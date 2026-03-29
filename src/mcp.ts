@@ -586,6 +586,13 @@ export async function startMcpServer(
     });
   });
 
+  // ─── SSE endpoint — reject POST so clients fall back to SSE transport
+  app.post("/sse", (_req: Request, res: Response) => {
+    res.status(405).set("Allow", "GET").json({
+      error: "Method Not Allowed. Use GET for SSE connection.",
+    });
+  });
+
   // ─── SSE endpoint — MCP client connects here ─────────────────────
   app.get("/sse", async (req: Request, res: Response) => {
     mcpLogger.info(`New SSE connection from ${req.ip}`);
