@@ -574,96 +574,60 @@ export async function startMcpServer(
   const app = express();
   app.use(express.json());
 
-  // Store active sessions
-  const sessions = new Map<
-    string,
-    { transport: StreamableHTTPServerTransport; server: McpServer }
-  >();
-
   // ─── Health check endpoint ────────────────────────────────────────
   app.get("/health", (_req: Request, res: Response) => {
     res.json({
       status: "ok",
       whatsapp_connected: !!(sock && sock.user),
-      whatsapp_user: sock?.user?.name ?? null,
-      active_sessions: sessions.size,
       timestamp: new Date().toISOString(),
     });
   });
 
-  // ─── Streamable HTTP: POST /sse — JSON-RPC messages ──────────────
+  // ─── Streamable HTTP: POST /sse — stateless mode ─────────────────
   app.post("/sse", async (req: Request, res: Response) => {
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    mcpLogger.info(`POST /sse from ${req.ip}`);
 
-    // Existing session
-    if (sessionId && sessions.has(sessionId)) {
-      const session = sessions.get(sessionId)!;
-      await session.transport.handleRequest(req, res, req.body);
-      return;
-    }
-
-    // New session (initialize request)
-    const isInit =
-      req.body?.method === "initialize" ||
-      (Array.isArray(req.body) &&
-        req.body.some((msg: any) => msg.method === "initialize"));
-
-    if (!isInit && sessionId) {
-      res.status(404).json({ error: "Session not found" });
-      return;
-    }
-
-    mcpLogger.info(`New Streamable HTTP session from ${req.ip}`);
-
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-    });
-
-    const server = createMcpServer(sock, mcpLogger, waLogger);
-
-    transport.onclose = () => {
-      const sid = transport.sessionId;
-      if (sid) {
-        mcpLogger.info(`Session closed: ${sid}`);
-        sessions.delete(sid);
-      }
-    };
-
-    await server.connect(transport);
-
-    const sid = transport.sessionId;
-    if (sid) {
-      sessions.set(sid, { transport, server });
-      mcpLogger.info(`Session created: ${sid}`);
-    }
-
-    await transport.handleRequest(req, res, req.body);
-  });
-
-  // ─── Streamable HTTP: GET /sse — SSE stream for server notifications
-  app.get("/sse", async (req: Request, res: Response) => {
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
-
-    if (sessionId && sessions.has(sessionId)) {
-      const session = sessions.get(sessionId)!;
-      await session.transport.handleRequest(req, res);
-    } else {
-      res.status(400).json({
-        error: "No valid session. Send an initialize request first.",
+    try {
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined, // stateless
       });
+
+      const server = createMcpServer(sock, mcpLogger, waLogger);
+
+      res.on("close", () => {
+        transport.close();
+        server.close();
+      });
+
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (error: any) {
+      mcpLogger.error(`Error handling POST /sse: ${error.message}`);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal server error" },
+          id: null,
+        });
+      }
     }
   });
 
-  // ─── Streamable HTTP: DELETE /sse — session cleanup ───────────────
-  app.delete("/sse", async (req: Request, res: Response) => {
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  // ─── GET & DELETE not supported in stateless mode ─────────────────
+  app.get("/sse", (_req: Request, res: Response) => {
+    res.status(405).set("Allow", "POST").json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Method not allowed in stateless mode. Use POST." },
+      id: null,
+    });
+  });
 
-    if (sessionId && sessions.has(sessionId)) {
-      const session = sessions.get(sessionId)!;
-      await session.transport.handleRequest(req, res);
-    } else {
-      res.status(404).json({ error: "Session not found" });
-    }
+  app.delete("/sse", (_req: Request, res: Response) => {
+    res.status(405).set("Allow", "POST").json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Method not allowed in stateless mode." },
+      id: null,
+    });
   });
 
   // ─── Start the HTTP server ────────────────────────────────────────
