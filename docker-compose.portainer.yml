@@ -15,17 +15,11 @@ services:
       - WHATSAPP_MCP_DATA_DIR=/app/data
       - WHATSAPP_AUTH_DIR=/app/auth_info
     volumes:
-      - whatsapp_data:/app/data
-      - whatsapp_auth:/app/auth_info
+      - //nexus/docker/whatsapp-mcp/data:/app/data
+      - //nexus/docker/whatsapp-mcp/auth_info:/app/auth_info
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/health"]
       interval: 30s
       timeout: 5s
       start_period: 60s
       retries: 3
-
-volumes:
-  whatsapp_data:
-    driver: local
-  whatsapp_auth:
-    driver: local
