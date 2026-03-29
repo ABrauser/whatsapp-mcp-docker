@@ -38,7 +38,7 @@ Add to your MCP client configuration:
 {
   "mcpServers": {
     "whatsapp": {
-      "url": "http://192.168.0.101:3001/sse"
+      "url": "http://192.168.0.101:3010/sse"
     }
   }
 }
@@ -68,7 +68,7 @@ Add to your MCP client configuration:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MCP_PORT` | `3001` | HTTP server port |
+| `MCP_PORT` | `3010` | HTTP server port |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 | `WHATSAPP_MCP_DATA_DIR` | `/app/data` | SQLite database directory |
 | `WHATSAPP_AUTH_DIR` | `/app/auth_info` | WhatsApp auth credentials directory |
@@ -94,7 +94,7 @@ AI Client (Gemini CLI, Claude, etc.)
     │ HTTP SSE
     ▼
 ┌─────────────────────┐
-│  Express Server     │  Port 3001
+│  Express Server     │  Port 3010
 │  ├── GET /sse       │  SSE connection
 │  ├── POST /messages │  JSON-RPC
 │  └── GET /health    │  Health check

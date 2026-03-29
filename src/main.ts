@@ -3,7 +3,7 @@ import { initializeDatabase } from "./database.ts";
 import { startWhatsAppConnection, type WhatsAppSocket } from "./whatsapp.ts";
 import { startMcpServer } from "./mcp.ts";
 
-const port = parseInt(process.env.MCP_PORT || "3001", 10);
+const port = parseInt(process.env.MCP_PORT || "3010", 10);
 
 const dataDir = process.env.WHATSAPP_MCP_DATA_DIR || '.';
 const waLogger = pino(

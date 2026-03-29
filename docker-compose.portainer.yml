@@ -8,9 +8,9 @@ services:
     container_name: whatsapp-mcp
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      - "3010:3010"
     environment:
-      - MCP_PORT=3001
+      - MCP_PORT=3010
       - LOG_LEVEL=info
       - WHATSAPP_MCP_DATA_DIR=/app/data
       - WHATSAPP_AUTH_DIR=/app/auth_info
@@ -18,7 +18,7 @@ services:
       - //nexus/docker/whatsapp-mcp/data:/app/data
       - //nexus/docker/whatsapp-mcp/auth_info:/app/auth_info
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3010/health"]
       interval: 30s
       timeout: 5s
       start_period: 60s

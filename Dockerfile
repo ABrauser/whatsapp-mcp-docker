@@ -20,17 +20,17 @@ COPY src ./src
 RUN mkdir -p /app/data /app/auth_info
 
 # Environment variables
-ENV MCP_PORT=3001
+ENV MCP_PORT=3010
 ENV WHATSAPP_MCP_DATA_DIR=/app/data
 ENV WHATSAPP_AUTH_DIR=/app/auth_info
 ENV LOG_LEVEL=info
 
 # Expose MCP SSE port
-EXPOSE 3001
+EXPOSE 3010
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD wget -q --spider http://localhost:3001/health || exit 1
+  CMD wget -q --spider http://localhost:3010/health || exit 1
 
 # Run the server
 CMD ["node", "src/main.ts"]
