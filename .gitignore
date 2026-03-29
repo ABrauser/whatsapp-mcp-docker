@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/
+auth_info/
+*.log
+wa-logs.txt
+mcp-logs.txt
+.env
