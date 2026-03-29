@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { jidNormalizedUser } from "@whiskeysockets/baileys";
 import express, { type Request, type Response } from "express";
@@ -568,13 +569,16 @@ export async function startMcpServer(
   waLogger: P.Logger,
   port: number,
 ): Promise<void> {
-  mcpLogger.info("Initializing MCP server with SSE transport...");
+  mcpLogger.info("Initializing MCP server with Streamable HTTP transport...");
 
   const app = express();
   app.use(express.json());
 
-  // Store active SSE transports by session ID
-  const transports: Record<string, SSEServerTransport> = {};
+  // Store active sessions
+  const sessions = new Map<
+    string,
+    { transport: StreamableHTTPServerTransport; server: McpServer }
+  >();
 
   // ─── Health check endpoint ────────────────────────────────────────
   app.get("/health", (_req: Request, res: Response) => {
@@ -582,63 +586,91 @@ export async function startMcpServer(
       status: "ok",
       whatsapp_connected: !!(sock && sock.user),
       whatsapp_user: sock?.user?.name ?? null,
+      active_sessions: sessions.size,
       timestamp: new Date().toISOString(),
     });
   });
 
-  // ─── SSE endpoint — reject POST so clients fall back to SSE transport
-  app.post("/sse", (_req: Request, res: Response) => {
-    res.status(405).set("Allow", "GET").json({
-      error: "Method Not Allowed. Use GET for SSE connection.",
+  // ─── Streamable HTTP: POST /sse — JSON-RPC messages ──────────────
+  app.post("/sse", async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+    // Existing session
+    if (sessionId && sessions.has(sessionId)) {
+      const session = sessions.get(sessionId)!;
+      await session.transport.handleRequest(req, res, req.body);
+      return;
+    }
+
+    // New session (initialize request)
+    const isInit =
+      req.body?.method === "initialize" ||
+      (Array.isArray(req.body) &&
+        req.body.some((msg: any) => msg.method === "initialize"));
+
+    if (!isInit && sessionId) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+
+    mcpLogger.info(`New Streamable HTTP session from ${req.ip}`);
+
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
     });
-  });
 
-  // ─── SSE endpoint — MCP client connects here ─────────────────────
-  app.get("/sse", async (req: Request, res: Response) => {
-    mcpLogger.info(`New SSE connection from ${req.ip}`);
-
-    const transport = new SSEServerTransport("/messages", res);
-    const sessionId = transport.sessionId;
-    transports[sessionId] = transport;
-
-    mcpLogger.info(`SSE session created: ${sessionId}`);
-
-    // Clean up on disconnect
-    res.on("close", () => {
-      mcpLogger.info(`SSE session closed: ${sessionId}`);
-      delete transports[sessionId];
-    });
-
-    // Create a new MCP server instance per session
     const server = createMcpServer(sock, mcpLogger, waLogger);
+
+    transport.onclose = () => {
+      const sid = transport.sessionId;
+      if (sid) {
+        mcpLogger.info(`Session closed: ${sid}`);
+        sessions.delete(sid);
+      }
+    };
+
     await server.connect(transport);
+
+    const sid = transport.sessionId;
+    if (sid) {
+      sessions.set(sid, { transport, server });
+      mcpLogger.info(`Session created: ${sid}`);
+    }
+
+    await transport.handleRequest(req, res, req.body);
   });
 
-  // ─── Message endpoint — MCP client sends JSON-RPC here ───────────
-  app.post("/messages", async (req: Request, res: Response) => {
-    const sessionId = req.query.sessionId as string;
+  // ─── Streamable HTTP: GET /sse — SSE stream for server notifications
+  app.get("/sse", async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
-    if (!sessionId) {
-      mcpLogger.warn("POST /messages called without sessionId");
-      res.status(400).json({ error: "Missing sessionId query parameter" });
-      return;
+    if (sessionId && sessions.has(sessionId)) {
+      const session = sessions.get(sessionId)!;
+      await session.transport.handleRequest(req, res);
+    } else {
+      res.status(400).json({
+        error: "No valid session. Send an initialize request first.",
+      });
     }
+  });
 
-    const transport = transports[sessionId];
-    if (!transport) {
-      mcpLogger.warn(`POST /messages: Unknown session ${sessionId}`);
-      res.status(404).json({ error: "Session not found. Connect to /sse first." });
-      return;
+  // ─── Streamable HTTP: DELETE /sse — session cleanup ───────────────
+  app.delete("/sse", async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+    if (sessionId && sessions.has(sessionId)) {
+      const session = sessions.get(sessionId)!;
+      await session.transport.handleRequest(req, res);
+    } else {
+      res.status(404).json({ error: "Session not found" });
     }
-
-    await transport.handlePostMessage(req, res);
   });
 
   // ─── Start the HTTP server ────────────────────────────────────────
   app.listen(port, "0.0.0.0", () => {
-    mcpLogger.info(`MCP SSE server listening on http://0.0.0.0:${port}`);
+    mcpLogger.info(`MCP server listening on http://0.0.0.0:${port}`);
     console.log(`\n🚀 MCP Server ready at http://0.0.0.0:${port}`);
-    console.log(`   SSE endpoint:    http://0.0.0.0:${port}/sse`);
+    console.log(`   MCP endpoint:    http://0.0.0.0:${port}/sse`);
     console.log(`   Health check:    http://0.0.0.0:${port}/health`);
     console.log(`\n   Configure your MCP client with:`);
     console.log(`   { "url": "http://<YOUR-IP>:${port}/sse" }\n`);
