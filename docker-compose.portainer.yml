@@ -1,0 +1,31 @@
+## Portainer Stack - WhatsApp MCP Server
+## Deploy this file as a stack in Portainer.
+## Image: ghcr.io/abrauser/whatsapp-mcp-docker:latest
+
+services:
+  whatsapp-mcp:
+    image: ghcr.io/abrauser/whatsapp-mcp-docker:latest
+    container_name: whatsapp-mcp
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - MCP_PORT=3001
+      - LOG_LEVEL=info
+      - WHATSAPP_MCP_DATA_DIR=/app/data
+      - WHATSAPP_AUTH_DIR=/app/auth_info
+    volumes:
+      - whatsapp_data:/app/data
+      - whatsapp_auth:/app/auth_info
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  whatsapp_data:
+    driver: local
+  whatsapp_auth:
+    driver: local
