@@ -17,9 +17,3 @@ services:
     volumes:
       - /opt/docker/whatsapp-mcp/data:/app/data
       - /opt/docker/whatsapp-mcp/auth_info:/app/auth_info
-    healthcheck:
-      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:3010/health"]
-      interval: 30s
-      timeout: 5s
-      start_period: 60s
-      retries: 3
