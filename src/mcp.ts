@@ -19,6 +19,12 @@ import {
 import { sendWhatsAppMessage, type WhatsAppSocket } from "./whatsapp.ts";
 import { type P } from "pino";
 
+const TZ = process.env.TZ || "Europe/Berlin";
+
+function toLocalTime(date: Date): string {
+  return date.toLocaleString("sv-SE", { timeZone: TZ }).replace("T", " ");
+}
+
 function formatDbMessageForJson(msg: DbMessage) {
   return {
     id: msg.id,
@@ -31,7 +37,7 @@ function formatDbMessageForJson(msg: DbMessage) {
         ? "Me"
         : "Unknown",
     content: msg.content,
-    timestamp: msg.timestamp.toISOString(),
+    timestamp: toLocalTime(msg.timestamp),
     is_from_me: msg.is_from_me,
   };
 }
@@ -41,7 +47,7 @@ function formatDbChatForJson(chat: DbChat) {
     jid: chat.jid,
     name: chat.name ?? chat.jid.split("@")[0] ?? "Unknown Chat",
     is_group: chat.jid.endsWith("@g.us"),
-    last_message_time: chat.last_message_time?.toISOString() ?? null,
+    last_message_time: chat.last_message_time ? toLocalTime(chat.last_message_time) : null,
     last_message_preview: chat.last_message ?? null,
     last_sender_jid: chat.last_sender ?? null,
     last_sender_display: chat.last_sender
@@ -579,7 +585,7 @@ export async function startMcpServer(
     res.json({
       status: "ok",
       whatsapp_connected: !!(sock && sock.user),
-      timestamp: new Date().toISOString(),
+      timestamp: toLocalTime(new Date()),
     });
   });
 
