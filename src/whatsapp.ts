@@ -37,26 +37,40 @@ function parseMessageForDb(msg: WAMessage): DbMessage | null {
     content = msg.message.conversation;
   } else if (msg.message.extendedTextMessage?.text) {
     content = msg.message.extendedTextMessage.text;
-  } else if (msg.message.imageMessage?.caption) {
-    content = `[Image] ${msg.message.imageMessage.caption}`;
-  } else if (msg.message.videoMessage?.caption) {
-    content = `[Video] ${msg.message.videoMessage.caption}`;
-  } else if (msg.message.documentMessage?.caption) {
+  } else if (msg.message.imageMessage) {
+    content = msg.message.imageMessage.caption
+      ? `[Image] ${msg.message.imageMessage.caption}`
+      : `[Image]`;
+  } else if (msg.message.videoMessage) {
+    content = msg.message.videoMessage.caption
+      ? `[Video] ${msg.message.videoMessage.caption}`
+      : `[Video]`;
+  } else if (msg.message.documentMessage) {
     content = `[Document] ${
       msg.message.documentMessage.caption ||
       msg.message.documentMessage.fileName ||
       ""
     }`;
   } else if (msg.message.audioMessage) {
-    content = `[Audio]`;
+    content = msg.message.audioMessage.ptt ? `[Voice Note]` : `[Audio]`;
   } else if (msg.message.stickerMessage) {
     content = `[Sticker]`;
-  } else if (msg.message.locationMessage?.address) {
-    content = `[Location] ${msg.message.locationMessage.address}`;
+  } else if (msg.message.locationMessage) {
+    content = msg.message.locationMessage.address
+      ? `[Location] ${msg.message.locationMessage.address}`
+      : `[Location]`;
+  } else if (msg.message.liveLocationMessage) {
+    content = `[Live Location]`;
   } else if (msg.message.contactMessage?.displayName) {
     content = `[Contact] ${msg.message.contactMessage.displayName}`;
+  } else if (msg.message.contactsArrayMessage) {
+    content = `[Contacts] ${msg.message.contactsArrayMessage.contacts?.length ?? 0} contacts`;
   } else if (msg.message.pollCreationMessage?.name) {
     content = `[Poll] ${msg.message.pollCreationMessage.name}`;
+  } else if (msg.message.reactionMessage) {
+    content = `[Reaction] ${msg.message.reactionMessage.text || ""}`;
+  } else if (msg.message.viewOnceMessage?.message || msg.message.viewOnceMessageV2?.message) {
+    content = `[View Once]`;
   }
 
   if (!content) {
@@ -241,6 +255,41 @@ export async function startWhatsAppConnection(
             ? new Date(Number(chatUpdate.conversationTimestamp) * 1000)
             : undefined,
         });
+      }
+    }
+
+    // ─── Contact sync events (populate names over time) ────────────
+    if (events["contacts.upsert"]) {
+      const contacts = events["contacts.upsert"];
+      logger.info(
+        { count: contacts.length },
+        "Received contacts.upsert event"
+      );
+      for (const c of contacts) {
+        storeContact({
+          jid: c.id,
+          name: c.name ?? null,
+          notify: c.notify ?? null,
+          phoneNumber: (c as any).phoneNumber ?? null,
+        });
+      }
+    }
+
+    if (events["contacts.update"]) {
+      const contacts = events["contacts.update"];
+      logger.info(
+        { count: contacts.length },
+        "Received contacts.update event"
+      );
+      for (const c of contacts) {
+        if (c.id) {
+          storeContact({
+            jid: c.id,
+            name: c.name ?? null,
+            notify: c.notify ?? null,
+            phoneNumber: (c as any).phoneNumber ?? null,
+          });
+        }
       }
     }
   });
