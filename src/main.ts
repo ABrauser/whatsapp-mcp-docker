@@ -1,11 +1,13 @@
 import { pino } from "pino";
-import { initializeDatabase } from "./database.ts";
-import { startWhatsAppConnection, type WhatsAppSocket } from "./whatsapp.ts";
+import { initializeDatabase, closeDatabase } from "./database.ts";
+import { startWhatsAppConnection, stopWhatsAppConnection, type WhatsAppSocket } from "./whatsapp.ts";
 import { startMcpServer } from "./mcp.ts";
+import { type Server } from "node:http";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 const port = parseInt(process.env.MCP_PORT || "3010", 10);
+const dataDir = process.env.WHATSAPP_MCP_DATA_DIR || ".";
 
-const dataDir = process.env.WHATSAPP_MCP_DATA_DIR || '.';
 const waLogger = pino(
   {
     level: process.env.LOG_LEVEL || "info",
@@ -22,14 +24,16 @@ const mcpLogger = pino(
   pino.destination(`${dataDir}/mcp-logs.txt`)
 );
 
+let whatsappSocket: WhatsAppSocket | null = null;
+let httpServer: Server | null = null;
+let mcpServer: McpServer | null = null;
+
 async function main() {
   console.log("╔══════════════════════════════════════════════════════╗");
   console.log("║       WhatsApp MCP Server (Docker Edition)          ║");
   console.log("╚══════════════════════════════════════════════════════╝");
 
   mcpLogger.info("Starting WhatsApp MCP Server...");
-
-  let whatsappSocket: WhatsAppSocket | null = null;
 
   try {
     mcpLogger.info("Initializing database...");
@@ -52,7 +56,9 @@ async function main() {
 
   try {
     mcpLogger.info("Starting MCP server...");
-    await startMcpServer(whatsappSocket, mcpLogger, waLogger, port);
+    const result = await startMcpServer(whatsappSocket, mcpLogger, waLogger, port);
+    httpServer = result.httpServer;
+    mcpServer = result.mcpServer;
     mcpLogger.info("MCP Server started and listening.");
   } catch (error: any) {
     mcpLogger.fatal({ err: error }, "Failed to start MCP server");
@@ -67,9 +73,32 @@ async function shutdown(signal: string) {
   mcpLogger.info(`Received ${signal}. Shutting down gracefully...`);
   console.log(`\n🛑 Received ${signal}. Shutting down...`);
 
+  if (httpServer) {
+    mcpLogger.info("Closing HTTP server...");
+    httpServer.close();
+  }
+
+  if (mcpServer) {
+    mcpLogger.info("Closing MCP server...");
+    try {
+      await mcpServer.close();
+    } catch (err: any) {
+      mcpLogger.error(`Error closing MCP server: ${err.message}`);
+    }
+  }
+
+  if (whatsappSocket) {
+    mcpLogger.info("Closing WhatsApp connection...");
+    stopWhatsAppConnection(whatsappSocket);
+  }
+
+  mcpLogger.info("Closing database...");
+  closeDatabase();
+
   waLogger.flush();
   mcpLogger.flush();
 
+  mcpLogger.info("Shutdown complete.");
   process.exit(0);
 }
 

@@ -105,6 +105,8 @@ function parseMessageForDb(msg: WAMessage): DbMessage | null {
   };
 }
 
+let isShuttingDown = false;
+
 export async function startWhatsAppConnection(
   logger: P.Logger
 ): Promise<WhatsAppSocket> {
@@ -153,6 +155,12 @@ export async function startWhatsAppConnection(
           }`,
           lastDisconnect?.error
         );
+
+        if (isShuttingDown) {
+          logger.info("Shutdown in progress, skipping reconnection.");
+          return;
+        }
+
         if (statusCode !== DisconnectReason.loggedOut) {
           logger.info("Reconnecting...");
           startWhatsAppConnection(logger);
@@ -295,6 +303,17 @@ export async function startWhatsAppConnection(
   });
 
   return sock;
+}
+
+export function stopWhatsAppConnection(sock: WhatsAppSocket | null) {
+  isShuttingDown = true;
+  if (sock) {
+    try {
+      sock.end(undefined);
+    } catch (error) {
+      // Ignore errors during end
+    }
+  }
 }
 
 export async function sendWhatsAppMessage(

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { jidNormalizedUser } from "@whiskeysockets/baileys";
 import express, { type Request, type Response } from "express";
+import { type Server } from "node:http";
 
 import {
   type Message as DbMessage,
@@ -574,9 +575,10 @@ export async function startMcpServer(
   mcpLogger: P.Logger,
   waLogger: P.Logger,
   port: number,
-): Promise<void> {
+): Promise<{ httpServer: Server; mcpServer: McpServer }> {
   mcpLogger.info("Initializing MCP server with Streamable HTTP transport...");
 
+  const mcpServer = createMcpServer(sock, mcpLogger, waLogger);
   const app = express();
   app.use(express.json());
 
@@ -598,14 +600,13 @@ export async function startMcpServer(
         sessionIdGenerator: undefined, // stateless
       });
 
-      const server = createMcpServer(sock, mcpLogger, waLogger);
-
       res.on("close", () => {
-        transport.close();
-        server.close();
+        transport.close().catch((err) => {
+          mcpLogger.error(`Error closing transport: ${err.message}`);
+        });
       });
 
-      await server.connect(transport);
+      await mcpServer.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (error: any) {
       mcpLogger.error(`Error handling POST /sse: ${error.message}`);
@@ -637,12 +638,15 @@ export async function startMcpServer(
   });
 
   // ─── Start the HTTP server ────────────────────────────────────────
-  app.listen(port, "0.0.0.0", () => {
-    mcpLogger.info(`MCP server listening on http://0.0.0.0:${port}`);
-    console.log(`\n🚀 MCP Server ready at http://0.0.0.0:${port}`);
-    console.log(`   MCP endpoint:    http://0.0.0.0:${port}/sse`);
-    console.log(`   Health check:    http://0.0.0.0:${port}/health`);
-    console.log(`\n   Configure your MCP client with:`);
-    console.log(`   { "url": "http://<YOUR-IP>:${port}/sse" }\n`);
+  return new Promise((resolve) => {
+    const httpServer = app.listen(port, "0.0.0.0", () => {
+      mcpLogger.info(`MCP server listening on http://0.0.0.0:${port}`);
+      console.log(`\n🚀 MCP Server ready at http://0.0.0.0:${port}`);
+      console.log(`   MCP endpoint:    http://0.0.0.0:${port}/sse`);
+      console.log(`   Health check:    http://0.0.0.0:${port}/health`);
+      console.log(`\n   Configure your MCP client with:`);
+      console.log(`   { "url": "http://<YOUR-IP>:${port}/sse" }\n`);
+      resolve({ httpServer, mcpServer });
+    });
   });
 }
