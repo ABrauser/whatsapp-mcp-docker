@@ -1,4 +1,4 @@
-import { pino } from "pino";
+import pino from "pino";
 import { initializeDatabase, closeDatabase } from "./database.ts";
 import { startWhatsAppConnection, stopWhatsAppConnection, type WhatsAppSocket } from "./whatsapp.ts";
 import { startMcpServer } from "./mcp.ts";
