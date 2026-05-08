@@ -17,12 +17,14 @@ import {
   searchMessages,
 } from "./database.ts";
 
-import { sendWhatsAppMessage, type WhatsAppSocket } from "./whatsapp.ts";
+import { sendWhatsAppMessage, type WhatsAppConnection } from "./whatsapp.ts";
 import { type P } from "pino";
 
 const TZ = process.env.TZ || "Europe/Berlin";
 
 function toLocalTime(date: Date): string {
+  // Use sv-SE (Sweden) as a hack to get YYYY-MM-DD HH:mm:ss format
+  // which is close to ISO but more readable in chat history.
   return date.toLocaleString("sv-SE", { timeZone: TZ }).replace("T", " ");
 }
 
@@ -61,7 +63,7 @@ function formatDbChatForJson(chat: DbChat) {
 }
 
 function createMcpServer(
-  sock: WhatsAppSocket | null,
+  connection: WhatsAppConnection | null,
   mcpLogger: P.Logger,
   waLogger: P.Logger,
 ): McpServer {
@@ -409,14 +411,14 @@ function createMcpServer(
     },
     async ({ recipient, message }) => {
       mcpLogger.info(`[MCP Tool] Executing send_message to ${recipient}`);
-      if (!sock) {
+      if (!connection || !connection.sock) {
         mcpLogger.error(
-          "[MCP Tool Error] send_message failed: WhatsApp socket is not available.",
+          "[MCP Tool Error] send_message failed: WhatsApp connection is not active.",
         );
         return {
           isError: true,
           content: [
-            { type: "text", text: "Error: WhatsApp connection is not active." },
+            { type: "text", text: "Error: WhatsApp connection is not active or reconnecting." },
           ],
         };
       }
@@ -445,7 +447,7 @@ function createMcpServer(
       try {
         const result = await sendWhatsAppMessage(
           waLogger,
-          sock,
+          connection,
           normalizedRecipient,
           message,
         );
@@ -571,14 +573,14 @@ function createMcpServer(
 }
 
 export async function startMcpServer(
-  sock: WhatsAppSocket | null,
+  connection: WhatsAppConnection | null,
   mcpLogger: P.Logger,
   waLogger: P.Logger,
   port: number,
 ): Promise<{ httpServer: Server; mcpServer: McpServer }> {
   mcpLogger.info("Initializing MCP server with Streamable HTTP transport...");
 
-  const mcpServer = createMcpServer(sock, mcpLogger, waLogger);
+  const mcpServer = createMcpServer(connection, mcpLogger, waLogger);
   const app = express();
   app.use(express.json());
 
@@ -586,7 +588,7 @@ export async function startMcpServer(
   app.get("/health", (_req: Request, res: Response) => {
     res.json({
       status: "ok",
-      whatsapp_connected: !!(sock && sock.user),
+      whatsapp_connected: !!(connection && connection.sock && connection.sock.user),
       timestamp: toLocalTime(new Date()),
     });
   });

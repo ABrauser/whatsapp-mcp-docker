@@ -67,8 +67,6 @@ function parseMessageForDb(msg: WAMessage): DbMessage | null {
     content = `[Contacts] ${msg.message.contactsArrayMessage.contacts?.length ?? 0} contacts`;
   } else if (msg.message.pollCreationMessage?.name) {
     content = `[Poll] ${msg.message.pollCreationMessage.name}`;
-  } else if (msg.message.reactionMessage) {
-    content = `[Reaction] ${msg.message.reactionMessage.text || ""}`;
   } else if (msg.message.viewOnceMessage?.message || msg.message.viewOnceMessageV2?.message) {
     content = `[View Once]`;
   }
@@ -105,12 +103,20 @@ function parseMessageForDb(msg: WAMessage): DbMessage | null {
   };
 }
 
+export interface WhatsAppConnection {
+  sock: WhatsAppSocket | null;
+}
+
 let isShuttingDown = false;
+let reconnectAttempts = 0;
 
 export async function startWhatsAppConnection(
-  logger: P.Logger
-): Promise<WhatsAppSocket> {
+  logger: P.Logger,
+  connectionHolder?: WhatsAppConnection
+): Promise<WhatsAppConnection> {
   initializeDatabase();
+
+  const holder: WhatsAppConnection = connectionHolder || { sock: null };
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version, isLatest } = await fetchLatestBaileysVersion();
@@ -124,8 +130,10 @@ export async function startWhatsAppConnection(
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
     generateHighQualityLinkPreview: true,
-    shouldIgnoreJid: (jid) => isJidGroup(jid),
   });
+
+  // Update the holder with the new socket
+  holder.sock = sock;
 
   sock.ev.process(async (events) => {
     if (events["connection.update"]) {
@@ -148,6 +156,7 @@ export async function startWhatsAppConnection(
       }
 
       if (connection === "close") {
+        holder.sock = null;
         const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
         logger.warn(
           `Connection closed. Reason: ${
@@ -162,8 +171,15 @@ export async function startWhatsAppConnection(
         }
 
         if (statusCode !== DisconnectReason.loggedOut) {
-          logger.info("Reconnecting...");
-          startWhatsAppConnection(logger);
+          reconnectAttempts++;
+          const delay = Math.min(Math.pow(2, reconnectAttempts) * 1000, 60000); // Exponential backoff capped at 60s
+          logger.info(`Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts})...`);
+          
+          setTimeout(() => {
+            if (!isShuttingDown) {
+              startWhatsAppConnection(logger, holder);
+            }
+          }, delay);
         } else {
           logger.error(
             "Connection closed: Logged Out. Please delete auth_info and restart."
@@ -171,6 +187,7 @@ export async function startWhatsAppConnection(
           process.exit(1);
         }
       } else if (connection === "open") {
+        reconnectAttempts = 0; // Reset attempts on successful connection
         logger.info(`Connection opened. WA user: ${sock.user?.name}`);
         console.log(`\n✅ WhatsApp connected as: ${sock.user?.name}\n`);
       }
@@ -181,20 +198,25 @@ export async function startWhatsAppConnection(
       logger.info("Credentials saved.");
     }
 
-    if (events["messaging-history.set"]) {
-      const { chats, contacts, messages } =
-        events["messaging-history.set"];
-      if (contacts.length > 0) {
-        logger.info(`Storing ${contacts.length} contacts from history sync.`);
-        contacts.forEach((c) =>
+    const handleContacts = (contacts: any[]) => {
+      for (const c of contacts) {
+        if (c.id) {
           storeContact({
             jid: c.id,
             name: c.name ?? null,
             notify: c.notify ?? null,
             phoneNumber: (c as any).phoneNumber ?? null,
-          })
-        );
-        logger.info(`Stored ${contacts.length} contacts from history sync.`);
+          });
+        }
+      }
+    };
+
+    if (events["messaging-history.set"]) {
+      const { chats, contacts, messages } =
+        events["messaging-history.set"];
+      if (contacts.length > 0) {
+        logger.info(`Storing ${contacts.length} contacts from history sync.`);
+        handleContacts(contacts);
       }
 
       logger.info(`Storing ${chats.length} chats from history sync.`);
@@ -208,15 +230,19 @@ export async function startWhatsAppConnection(
         })
       );
 
-      let storedCount = 0;
+      const parsedMessages: DbMessage[] = [];
       messages.forEach((msg) => {
         const parsed = parseMessageForDb(msg);
         if (parsed) {
-          storeMessage(parsed);
-          storedCount++;
+          parsedMessages.push(parsed);
         }
       });
-      logger.info(`Stored ${storedCount} messages from history sync.`);
+      
+      if (parsedMessages.length > 0) {
+        const { storeMessagesBatch } = await import("./database.ts");
+        storeMessagesBatch(parsedMessages);
+      }
+      logger.info(`Stored ${parsedMessages.length} messages from history sync.`);
     }
 
     if (events["messages.upsert"]) {
@@ -273,14 +299,7 @@ export async function startWhatsAppConnection(
         { count: contacts.length },
         "Received contacts.upsert event"
       );
-      for (const c of contacts) {
-        storeContact({
-          jid: c.id,
-          name: c.name ?? null,
-          notify: c.notify ?? null,
-          phoneNumber: (c as any).phoneNumber ?? null,
-        });
-      }
+      handleContacts(contacts);
     }
 
     if (events["contacts.update"]) {
@@ -289,27 +308,18 @@ export async function startWhatsAppConnection(
         { count: contacts.length },
         "Received contacts.update event"
       );
-      for (const c of contacts) {
-        if (c.id) {
-          storeContact({
-            jid: c.id,
-            name: c.name ?? null,
-            notify: c.notify ?? null,
-            phoneNumber: (c as any).phoneNumber ?? null,
-          });
-        }
-      }
+      handleContacts(contacts);
     }
   });
 
-  return sock;
+  return holder;
 }
 
-export function stopWhatsAppConnection(sock: WhatsAppSocket | null) {
+export function stopWhatsAppConnection(holder: WhatsAppConnection | null) {
   isShuttingDown = true;
-  if (sock) {
+  if (holder?.sock) {
     try {
-      sock.end(undefined);
+      holder.sock.end(undefined);
     } catch (error) {
       // Ignore errors during end
     }
@@ -318,10 +328,11 @@ export function stopWhatsAppConnection(sock: WhatsAppSocket | null) {
 
 export async function sendWhatsAppMessage(
   logger: P.Logger,
-  sock: WhatsAppSocket | null,
+  holder: WhatsAppConnection | null,
   recipientJid: string,
   text: string
 ): Promise<proto.WebMessageInfo | void> {
+  const sock = holder?.sock;
   if (!sock || !sock.user) {
     logger.error(
       "Cannot send message: WhatsApp socket not connected or initialized."

@@ -32,13 +32,14 @@ On first start, a QR code URL will appear in the logs. Open it in your browser a
 
 ### 3. Configure MCP Client
 
-Add to your MCP client configuration:
+Add to your MCP client configuration (Note: uses stateless Streamable HTTP):
 
 ```json
 {
   "mcpServers": {
     "whatsapp": {
-      "url": "http://192.168.0.101:3010/sse"
+      "command": "curl",
+      "args": ["-X", "POST", "http://192.168.0.101:3010/sse", "-H", "Content-Type: application/json", "-d", "@-"]
     }
   }
 }
@@ -48,8 +49,7 @@ Add to your MCP client configuration:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/sse` | GET | SSE connection for MCP clients |
-| `/messages` | POST | JSON-RPC message endpoint |
+| `/sse` | POST | Streamable HTTP endpoint for MCP (stateless) |
 | `/health` | GET | Health check |
 
 ## MCP Tools
@@ -91,19 +91,18 @@ docker build -t whatsapp-mcp-docker .
 ```
 AI Client (Gemini CLI, Claude, etc.)
     │
-    │ HTTP SSE
+    │ HTTP POST (Streamable)
     ▼
 ┌─────────────────────┐
 │  Express Server     │  Port 3010
-│  ├── GET /sse       │  SSE connection
-│  ├── POST /messages │  JSON-RPC
+│  ├── POST /sse      │  Stateless MCP
 │  └── GET /health    │  Health check
 ├─────────────────────┤
 │  MCP Server         │  7 Tools
 ├─────────────────────┤
-│  Baileys            │  WhatsApp Web API
+│  Baileys            │  WhatsApp Web API (Reconnects + Backoff)
 ├─────────────────────┤
-│  SQLite             │  Messages & Contacts
+│  SQLite             │  Messages & Contacts (Batch Sync)
 └─────────────────────┘
 ```
 

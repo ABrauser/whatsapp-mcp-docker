@@ -117,7 +117,8 @@ export function storeChat(chat: Partial<Chat> & { jid: string }): void {
 export function storeMessage(message: Message): void {
   const db = getDb();
   try {
-    storeChat({ jid: message.chat_jid, last_message_time: message.timestamp });
+    // Only insert the chat if it doesn't exist, we don't need to update last_message_time twice
+    db.prepare(`INSERT OR IGNORE INTO chats (jid, last_message_time) VALUES (?, ?)`).run(message.chat_jid, message.timestamp.toISOString());
 
     const stmt = db.prepare(`
             INSERT OR REPLACE INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
@@ -144,6 +145,45 @@ export function storeMessage(message: Message): void {
     });
   } catch (error) {
     console.error("Error storing message:", error);
+  }
+}
+
+export function storeMessagesBatch(messages: Message[]): void {
+  if (messages.length === 0) return;
+  const db = getDb();
+  try {
+    db.exec("BEGIN TRANSACTION");
+    const insertChatStmt = db.prepare(`INSERT OR IGNORE INTO chats (jid, last_message_time) VALUES (?, ?)`);
+    const insertMsgStmt = db.prepare(`
+            INSERT OR REPLACE INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+            VALUES (@id, @chat_jid, @sender, @content, @timestamp, @is_from_me)
+        `);
+    const updateChatTimeStmt = db.prepare(`
+            UPDATE chats
+            SET last_message_time = MAX(COALESCE(last_message_time, '1970-01-01T00:00:00.000Z'), @timestamp)
+            WHERE jid = @jid
+        `);
+
+    for (const msg of messages) {
+      const isoTime = msg.timestamp.toISOString();
+      insertChatStmt.run(msg.chat_jid, isoTime);
+      insertMsgStmt.run({
+        id: msg.id,
+        chat_jid: msg.chat_jid,
+        sender: msg.sender ?? null,
+        content: msg.content,
+        timestamp: isoTime,
+        is_from_me: msg.is_from_me ? 1 : 0,
+      });
+      updateChatTimeStmt.run({
+        timestamp: isoTime,
+        jid: msg.chat_jid,
+      });
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    console.error("Error storing messages batch:", error);
   }
 }
 

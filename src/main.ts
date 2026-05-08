@@ -1,6 +1,6 @@
 import pino from "pino";
 import { initializeDatabase, closeDatabase } from "./database.ts";
-import { startWhatsAppConnection, stopWhatsAppConnection, type WhatsAppSocket } from "./whatsapp.ts";
+import { startWhatsAppConnection, stopWhatsAppConnection, type WhatsAppConnection } from "./whatsapp.ts";
 import { startMcpServer } from "./mcp.ts";
 import { type Server } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -24,7 +24,7 @@ const mcpLogger = pino(
   pino.destination(`${dataDir}/mcp-logs.txt`)
 );
 
-let whatsappSocket: WhatsAppSocket | null = null;
+let whatsappConnection: WhatsAppConnection | null = null;
 let httpServer: Server | null = null;
 let mcpServer: McpServer | null = null;
 
@@ -43,7 +43,7 @@ async function main() {
 
     mcpLogger.info("Attempting to connect to WhatsApp...");
     console.log("⏳ Connecting to WhatsApp...");
-    whatsappSocket = await startWhatsAppConnection(waLogger);
+    whatsappConnection = await startWhatsAppConnection(waLogger);
     mcpLogger.info("WhatsApp connection process initiated.");
   } catch (error: any) {
     mcpLogger.fatal(
@@ -56,7 +56,7 @@ async function main() {
 
   try {
     mcpLogger.info("Starting MCP server...");
-    const result = await startMcpServer(whatsappSocket, mcpLogger, waLogger, port);
+    const result = await startMcpServer(whatsappConnection, mcpLogger, waLogger, port);
     httpServer = result.httpServer;
     mcpServer = result.mcpServer;
     mcpLogger.info("MCP Server started and listening.");
@@ -75,7 +75,9 @@ async function shutdown(signal: string) {
 
   if (httpServer) {
     mcpLogger.info("Closing HTTP server...");
-    httpServer.close();
+    await new Promise<void>((resolve) => {
+      httpServer.close(() => resolve());
+    });
   }
 
   if (mcpServer) {
@@ -87,9 +89,9 @@ async function shutdown(signal: string) {
     }
   }
 
-  if (whatsappSocket) {
+  if (whatsappConnection) {
     mcpLogger.info("Closing WhatsApp connection...");
-    stopWhatsAppConnection(whatsappSocket);
+    stopWhatsAppConnection(whatsappConnection);
   }
 
   mcpLogger.info("Closing database...");
