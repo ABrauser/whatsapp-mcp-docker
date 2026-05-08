@@ -119,24 +119,25 @@ export function debugLidMapping(logger: any): void {
     const lidContacts = db.prepare(`SELECT jid, name, notify, phone_number FROM contacts WHERE jid LIKE '%@lid'`).all() as any[];
     const chats = db.prepare(`SELECT jid, name, last_message_time FROM chats WHERE jid LIKE '%@lid'`).all() as any[];
     
-    logger.info("=== DEBUG: @lid Mapping Status ===");
-    logger.info(`Total @lid contacts in DB: ${lidContacts.length}`);
-    logger.info(`Total @lid chats in DB: ${chats.length}`);
+    console.log("\\n=== DEBUG: @lid Mapping Status ===");
+    console.log(`Total @lid contacts in DB: ${lidContacts.length}`);
+    console.log(`Total @lid chats in DB: ${chats.length}`);
     
     for (const chat of chats) {
       const contact = lidContacts.find(c => c.jid === chat.jid);
-      logger.info({
-        chatJid: chat.jid,
-        chatName: chat.name,
-        contactName: contact?.name,
-        contactNotify: contact?.notify,
-        contactPhone: contact?.phone_number,
-        canAutoResolve: !!contact?.phone_number
-      }, "Unresolved @lid Chat Analysis:");
+      console.log(`- Chat: ${chat.name || 'Unknown'} (${chat.jid})`);
+      console.log(`  -> Contact Match: ${contact ? 'YES' : 'NO'}`);
+      if (contact) {
+        console.log(`  -> Contact Name: ${contact.name || 'None'}`);
+        console.log(`  -> Contact Notify: ${contact.notify || 'None'}`);
+        console.log(`  -> Contact Phone: ${contact.phone_number || 'MISSING!'}`);
+        console.log(`  -> Auto-Resolve Possible: ${contact.phone_number ? 'YES ✅' : 'NO ❌'}`);
+      }
+      console.log("----------------------------------");
     }
-    logger.info("====================================");
+    console.log("====================================\\n");
   } catch (err) {
-    logger.error("Error running debugLidMapping:", err);
+    console.error("Error running debugLidMapping:", err);
   }
 }
 
