@@ -115,11 +115,15 @@ export function initializeDatabase(): DatabaseSync {
         // Ensure target chat exists to prevent foreign key failures
         db.prepare(`INSERT OR IGNORE INTO chats (jid, name, last_message_time) SELECT ?, name, last_message_time FROM chats WHERE jid = ?`).run(resolved, chat.jid);
         
-        // We found a fuzzy or phone match! Let's migrate the messages
+        // Move messages that can be moved (no duplicate ID in target)
         db.prepare(`UPDATE OR IGNORE messages SET chat_jid = ? WHERE chat_jid = ?`).run(resolved, chat.jid);
         db.prepare(`UPDATE OR IGNORE messages SET sender = ? WHERE sender = ?`).run(resolved, chat.jid);
-        // Delete the old @lid chat if it's now empty
-        db.prepare(`DELETE FROM chats WHERE jid = ? AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.chat_jid = ?)`).run(chat.jid, chat.jid);
+        
+        // Delete leftover duplicate messages that couldn't be moved (already exist in target)
+        db.prepare(`DELETE FROM messages WHERE chat_jid = ? AND id IN (SELECT id FROM messages WHERE chat_jid = ?)`).run(chat.jid, resolved);
+        
+        // Now the @lid chat should be empty — delete it
+        db.prepare(`DELETE FROM chats WHERE jid = ?`).run(chat.jid);
       }
     }
   } catch (err) {
@@ -143,7 +147,8 @@ export function migrateLidMessages(): void {
         db.prepare(`INSERT OR IGNORE INTO chats (jid, name, last_message_time) SELECT ?, name, last_message_time FROM chats WHERE jid = ?`).run(resolved, chat.jid);
         db.prepare(`UPDATE OR IGNORE messages SET chat_jid = ? WHERE chat_jid = ?`).run(resolved, chat.jid);
         db.prepare(`UPDATE OR IGNORE messages SET sender = ? WHERE sender = ?`).run(resolved, chat.jid);
-        db.prepare(`DELETE FROM chats WHERE jid = ? AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.chat_jid = ?)`).run(chat.jid, chat.jid);
+        db.prepare(`DELETE FROM messages WHERE chat_jid = ? AND id IN (SELECT id FROM messages WHERE chat_jid = ?)`).run(chat.jid, resolved);
+        db.prepare(`DELETE FROM chats WHERE jid = ?`).run(chat.jid);
         console.log(`[LID Migration] Merged ${chat.jid} -> ${resolved}`);
       }
     }
