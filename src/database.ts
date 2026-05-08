@@ -112,6 +112,9 @@ export function initializeDatabase(): DatabaseSync {
     for (const chat of lidChats) {
       const resolved = resolveJidSync(chat.jid);
       if (resolved && resolved !== chat.jid) {
+        // Ensure target chat exists to prevent foreign key failures
+        db.prepare(`INSERT OR IGNORE INTO chats (jid, name, last_message_time) SELECT ?, name, last_message_time FROM chats WHERE jid = ?`).run(resolved, chat.jid);
+        
         // We found a fuzzy or phone match! Let's migrate the messages
         db.prepare(`UPDATE OR IGNORE messages SET chat_jid = ? WHERE chat_jid = ?`).run(resolved, chat.jid);
         db.prepare(`UPDATE OR IGNORE messages SET sender = ? WHERE sender = ?`).run(resolved, chat.jid);
