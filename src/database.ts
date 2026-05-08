@@ -129,6 +129,29 @@ export function initializeDatabase(): DatabaseSync {
   return db;
 }
 
+/**
+ * Run at runtime after contacts are updated to migrate any @lid messages
+ * that can now be resolved to @s.whatsapp.net JIDs.
+ */
+export function migrateLidMessages(): void {
+  const db = getDb();
+  try {
+    const lidChats = db.prepare(`SELECT jid FROM chats WHERE jid LIKE '%@lid'`).all() as { jid: string }[];
+    for (const chat of lidChats) {
+      const resolved = resolveJidSync(chat.jid);
+      if (resolved && resolved !== chat.jid) {
+        db.prepare(`INSERT OR IGNORE INTO chats (jid, name, last_message_time) SELECT ?, name, last_message_time FROM chats WHERE jid = ?`).run(resolved, chat.jid);
+        db.prepare(`UPDATE OR IGNORE messages SET chat_jid = ? WHERE chat_jid = ?`).run(resolved, chat.jid);
+        db.prepare(`UPDATE OR IGNORE messages SET sender = ? WHERE sender = ?`).run(resolved, chat.jid);
+        db.prepare(`DELETE FROM chats WHERE jid = ? AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.chat_jid = ?)`).run(chat.jid, chat.jid);
+        console.log(`[LID Migration] Merged ${chat.jid} -> ${resolved}`);
+      }
+    }
+  } catch (err) {
+    console.error("Error in runtime LID migration:", err);
+  }
+}
+
 export function debugLidMapping(logger: any): void {
   const db = getDb();
   try {

@@ -19,6 +19,7 @@ import {
   storeChat,
   storeContact,
   debugLidMapping,
+  migrateLidMessages,
   type Message as DbMessage,
 } from "./database.ts";
 
@@ -215,6 +216,8 @@ export async function startWhatsAppConnection(
           });
         }
       }
+      // After storing new contact info, try to resolve any remaining @lid chats
+      migrateLidMessages();
     };
 
     if (events["messaging-history.set"]) {
