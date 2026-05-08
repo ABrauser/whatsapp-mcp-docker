@@ -332,19 +332,22 @@ export function storeMessagesBatch(messages: Message[]): void {
         `);
 
     for (const msg of messages) {
+      const resolvedChatJid = resolveJidSync(msg.chat_jid)!;
+      const resolvedSender = resolveJidSync(msg.sender) ?? null;
       const isoTime = msg.timestamp.toISOString();
-      insertChatStmt.run(msg.chat_jid, isoTime);
+      
+      insertChatStmt.run(resolvedChatJid, isoTime);
       insertMsgStmt.run({
         id: msg.id,
-        chat_jid: msg.chat_jid,
-        sender: msg.sender ?? null,
+        chat_jid: resolvedChatJid,
+        sender: resolvedSender,
         content: msg.content,
         timestamp: isoTime,
         is_from_me: msg.is_from_me ? 1 : 0,
       });
       updateChatTimeStmt.run({
         timestamp: isoTime,
-        jid: msg.chat_jid,
+        jid: resolvedChatJid,
       });
     }
     db.exec("COMMIT");
