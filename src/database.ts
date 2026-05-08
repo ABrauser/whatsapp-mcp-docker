@@ -124,6 +124,7 @@ export function initializeDatabase(): DatabaseSync {
         
         // Now the @lid chat should be empty — delete it
         db.prepare(`DELETE FROM chats WHERE jid = ?`).run(chat.jid);
+        console.log(`[LID] STARTUP MIGRATION: Merged ${chat.jid} -> ${resolved}`);
       }
     }
   } catch (err) {
@@ -149,7 +150,7 @@ export function migrateLidMessages(): void {
         db.prepare(`UPDATE OR IGNORE messages SET sender = ? WHERE sender = ?`).run(resolved, chat.jid);
         db.prepare(`DELETE FROM messages WHERE chat_jid = ? AND id IN (SELECT id FROM messages WHERE chat_jid = ?)`).run(chat.jid, resolved);
         db.prepare(`DELETE FROM chats WHERE jid = ?`).run(chat.jid);
-        console.log(`[LID Migration] Merged ${chat.jid} -> ${resolved}`);
+        console.log(`[LID] RUNTIME MIGRATION: Merged ${chat.jid} -> ${resolved}`);
       }
     }
   } catch (err) {
@@ -217,6 +218,7 @@ export function resolveJidSync(jid: string | null | undefined): string | null {
       if (row.phone_number) {
         const cleanPhone = row.phone_number.replace(/[^0-9]/g, "");
         if (cleanPhone) {
+          console.log(`[LID] RESOLVE (phone): ${jid} -> ${cleanPhone}@s.whatsapp.net`);
           return `${cleanPhone}@s.whatsapp.net`;
         }
       }
@@ -239,6 +241,7 @@ export function resolveJidSync(jid: string | null | undefined): string | null {
         
         // Only resolve if we find exactly ONE unique match to prevent sending messages to the wrong person
         if (matches.length === 1) {
+          console.log(`[LID] RESOLVE (fuzzy): ${jid} -> ${matches[0].jid} (matched name: "${searchTerm}")`);
           return matches[0].jid;
         }
       }
