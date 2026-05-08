@@ -13,6 +13,7 @@ services:
       - MCP_PORT=3010
       - TZ=Europe/Berlin
       - LOG_LEVEL=info
+      - WHATSAPP_DEBUG=true
       - WHATSAPP_MCP_DATA_DIR=/app/data
       - WHATSAPP_AUTH_DIR=/app/auth_info
     volumes:

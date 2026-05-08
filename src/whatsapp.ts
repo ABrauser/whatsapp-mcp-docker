@@ -18,6 +18,7 @@ import {
   storeMessagesBatch,
   storeChat,
   storeContact,
+  debugLidMapping,
   type Message as DbMessage,
 } from "./database.ts";
 
@@ -116,6 +117,10 @@ export async function startWhatsAppConnection(
   connectionHolder?: WhatsAppConnection
 ): Promise<WhatsAppConnection> {
   initializeDatabase();
+
+  if (process.env.WHATSAPP_DEBUG === "true") {
+    debugLidMapping(logger);
+  }
 
   const holder: WhatsAppConnection = connectionHolder || { sock: null };
 
