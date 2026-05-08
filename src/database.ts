@@ -86,11 +86,57 @@ export function initializeDatabase(): DatabaseSync {
     `CREATE INDEX IF NOT EXISTS idx_chats_last_message_time ON chats (last_message_time);`,
   );
 
+  // --- Migration: Merge existing @lid messages into @s.whatsapp.net ---
+  try {
+    db.exec(`
+      UPDATE OR IGNORE messages 
+      SET chat_jid = (SELECT phone_number || '@s.whatsapp.net' FROM contacts WHERE contacts.jid = messages.chat_jid AND phone_number IS NOT NULL)
+      WHERE chat_jid LIKE '%@lid' AND EXISTS (SELECT 1 FROM contacts WHERE contacts.jid = messages.chat_jid AND phone_number IS NOT NULL);
+    `);
+    
+    // Update sender JIDs as well
+    db.exec(`
+      UPDATE OR IGNORE messages 
+      SET sender = (SELECT phone_number || '@s.whatsapp.net' FROM contacts WHERE contacts.jid = messages.sender AND phone_number IS NOT NULL)
+      WHERE sender LIKE '%@lid' AND EXISTS (SELECT 1 FROM contacts WHERE contacts.jid = messages.sender AND phone_number IS NOT NULL);
+    `);
+
+    // Clean up empty @lid chats that have no messages left
+    db.exec(`
+      DELETE FROM chats 
+      WHERE jid LIKE '%@lid' AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.chat_jid = chats.jid);
+    `);
+  } catch (err) {
+    console.error("Migration error for @lid merge:", err);
+  }
+
   return db;
+}
+
+export function resolveJidSync(jid: string | null | undefined): string | null {
+  if (!jid) return null;
+  if (!jid.endsWith("@lid")) return jid;
+
+  const db = getDb();
+  try {
+    const stmt = db.prepare(`SELECT phone_number FROM contacts WHERE jid = ?`);
+    const row = stmt.get(jid) as { phone_number: string | null } | undefined;
+    if (row && row.phone_number) {
+      // Clean up phone number just in case
+      const cleanPhone = row.phone_number.replace(/[^0-9]/g, "");
+      if (cleanPhone) {
+        return `${cleanPhone}@s.whatsapp.net`;
+      }
+    }
+  } catch (err) {
+    console.error("Error resolving JID:", err);
+  }
+  return jid;
 }
 
 export function storeChat(chat: Partial<Chat> & { jid: string }): void {
   const db = getDb();
+  const resolvedJid = resolveJidSync(chat.jid)!;
   try {
     const stmt = db.prepare(`
             INSERT INTO chats (jid, name, last_message_time)
@@ -100,7 +146,7 @@ export function storeChat(chat: Partial<Chat> & { jid: string }): void {
                 last_message_time = COALESCE(excluded.last_message_time, last_message_time)
         `);
     stmt.run({
-      jid: chat.jid,
+      jid: resolvedJid,
       name: chat.name ?? null,
       last_message_time:
         chat.last_message_time instanceof Date
@@ -116,9 +162,12 @@ export function storeChat(chat: Partial<Chat> & { jid: string }): void {
 
 export function storeMessage(message: Message): void {
   const db = getDb();
+  const resolvedChatJid = resolveJidSync(message.chat_jid)!;
+  const resolvedSender = resolveJidSync(message.sender);
+  
   try {
     // Only insert the chat if it doesn't exist, we don't need to update last_message_time twice
-    db.prepare(`INSERT OR IGNORE INTO chats (jid, last_message_time) VALUES (?, ?)`).run(message.chat_jid, message.timestamp.toISOString());
+    db.prepare(`INSERT OR IGNORE INTO chats (jid, last_message_time) VALUES (?, ?)`).run(resolvedChatJid, message.timestamp.toISOString());
 
     const stmt = db.prepare(`
             INSERT OR REPLACE INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
@@ -127,8 +176,8 @@ export function storeMessage(message: Message): void {
 
     stmt.run({
       id: message.id,
-      chat_jid: message.chat_jid,
-      sender: message.sender ?? null,
+      chat_jid: resolvedChatJid,
+      sender: resolvedSender ?? null,
       content: message.content,
       timestamp: message.timestamp.toISOString(),
       is_from_me: message.is_from_me ? 1 : 0,
@@ -141,7 +190,7 @@ export function storeMessage(message: Message): void {
         `);
     updateChatTimeStmt.run({
       timestamp: message.timestamp.toISOString(),
-      jid: message.chat_jid,
+      jid: resolvedChatJid,
     });
   } catch (error) {
     console.error("Error storing message:", error);
