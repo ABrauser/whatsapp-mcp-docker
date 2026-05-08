@@ -106,6 +106,19 @@ export function initializeDatabase(): DatabaseSync {
       DELETE FROM chats 
       WHERE jid LIKE '%@lid' AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.chat_jid = chats.jid);
     `);
+
+    // --- Advanced Migration: Fuzzy Match Migration for existing @lid chats ---
+    const lidChats = db.prepare(`SELECT jid FROM chats WHERE jid LIKE '%@lid'`).all() as { jid: string }[];
+    for (const chat of lidChats) {
+      const resolved = resolveJidSync(chat.jid);
+      if (resolved && resolved !== chat.jid) {
+        // We found a fuzzy or phone match! Let's migrate the messages
+        db.prepare(`UPDATE OR IGNORE messages SET chat_jid = ? WHERE chat_jid = ?`).run(resolved, chat.jid);
+        db.prepare(`UPDATE OR IGNORE messages SET sender = ? WHERE sender = ?`).run(resolved, chat.jid);
+        // Delete the old @lid chat if it's now empty
+        db.prepare(`DELETE FROM chats WHERE jid = ? AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.chat_jid = ?)`).run(chat.jid, chat.jid);
+      }
+    }
   } catch (err) {
     console.error("Migration error for @lid merge:", err);
   }
