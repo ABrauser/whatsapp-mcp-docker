@@ -131,7 +131,25 @@ export function debugLidMapping(logger: any): void {
         console.log(`  -> Contact Name: ${contact.name || 'None'}`);
         console.log(`  -> Contact Notify: ${contact.notify || 'None'}`);
         console.log(`  -> Contact Phone: ${contact.phone_number || 'MISSING!'}`);
-        console.log(`  -> Auto-Resolve Possible: ${contact.phone_number ? 'YES ✅' : 'NO ❌'}`);
+        
+        let fuzzyResult = "NO ❌";
+        let resolvedJid = null;
+        const searchName = contact.name || contact.notify;
+        if (!contact.phone_number && searchName && searchName.trim().length > 2) {
+            const searchTerm = searchName.trim();
+            const matches = db.prepare(`
+              SELECT jid FROM contacts 
+              WHERE jid LIKE '%@s.whatsapp.net' 
+              AND (LOWER(name) = LOWER(?) OR LOWER(notify) = LOWER(?) OR LOWER(name) LIKE LOWER(?) OR LOWER(notify) LIKE LOWER(?))
+            `).all(searchTerm, searchTerm, `${searchTerm} %`, `${searchTerm} %`) as { jid: string }[];
+            if (matches.length === 1) {
+                fuzzyResult = `YES (Fuzzy matched to ${matches[0].jid}) ✅`;
+            } else if (matches.length > 1) {
+                fuzzyResult = `NO (Ambiguous: ${matches.length} matches) ❌`;
+            }
+        }
+        
+        console.log(`  -> Auto-Resolve Possible: ${contact.phone_number ? 'YES (via Phone) ✅' : fuzzyResult}`);
       }
       console.log("----------------------------------");
     }
@@ -147,13 +165,38 @@ export function resolveJidSync(jid: string | null | undefined): string | null {
 
   const db = getDb();
   try {
-    const stmt = db.prepare(`SELECT phone_number FROM contacts WHERE jid = ?`);
-    const row = stmt.get(jid) as { phone_number: string | null } | undefined;
-    if (row && row.phone_number) {
-      // Clean up phone number just in case
-      const cleanPhone = row.phone_number.replace(/[^0-9]/g, "");
-      if (cleanPhone) {
-        return `${cleanPhone}@s.whatsapp.net`;
+    const stmt = db.prepare(`SELECT name, notify, phone_number FROM contacts WHERE jid = ?`);
+    const row = stmt.get(jid) as { name: string | null; notify: string | null; phone_number: string | null } | undefined;
+    
+    if (row) {
+      // 1. Primary resolution via phone number
+      if (row.phone_number) {
+        const cleanPhone = row.phone_number.replace(/[^0-9]/g, "");
+        if (cleanPhone) {
+          return `${cleanPhone}@s.whatsapp.net`;
+        }
+      }
+
+      // 2. Secondary resolution via fuzzy name matching
+      const searchName = row.name || row.notify;
+      if (searchName && searchName.trim().length > 2) {
+        const searchTerm = searchName.trim();
+        const matchStmt = db.prepare(`
+          SELECT jid FROM contacts 
+          WHERE jid LIKE '%@s.whatsapp.net' 
+          AND (
+            LOWER(name) = LOWER(?) OR 
+            LOWER(notify) = LOWER(?) OR
+            LOWER(name) LIKE LOWER(?) OR
+            LOWER(notify) LIKE LOWER(?)
+          )
+        `);
+        const matches = matchStmt.all(searchTerm, searchTerm, `${searchTerm} %`, `${searchTerm} %`) as { jid: string }[];
+        
+        // Only resolve if we find exactly ONE unique match to prevent sending messages to the wrong person
+        if (matches.length === 1) {
+          return matches[0].jid;
+        }
       }
     }
   } catch (err) {
