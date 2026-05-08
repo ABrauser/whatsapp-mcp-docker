@@ -38,8 +38,7 @@ Add to your MCP client configuration (Note: uses stateless Streamable HTTP):
 {
   "mcpServers": {
     "whatsapp": {
-      "command": "curl",
-      "args": ["-X", "POST", "http://192.168.0.101:3010/sse", "-H", "Content-Type: application/json", "-d", "@-"]
+      "url": "http://192.168.0.101:3010/sse"
     }
   }
 }

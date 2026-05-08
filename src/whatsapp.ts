@@ -15,6 +15,7 @@ import path from "node:path";
 import {
   initializeDatabase,
   storeMessage,
+  storeMessagesBatch,
   storeChat,
   storeContact,
   type Message as DbMessage,
@@ -239,7 +240,6 @@ export async function startWhatsAppConnection(
       });
       
       if (parsedMessages.length > 0) {
-        const { storeMessagesBatch } = await import("./database.ts");
         storeMessagesBatch(parsedMessages);
       }
       logger.info(`Stored ${parsedMessages.length} messages from history sync.`);
