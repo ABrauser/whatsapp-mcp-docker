@@ -166,10 +166,10 @@ export async function startWhatsAppConnection(
         holder.sock = null;
         const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
         logger.warn(
+          { error: lastDisconnect?.error },
           `Connection closed. Reason: ${
             DisconnectReason[statusCode as number] || "Unknown"
-          }`,
-          lastDisconnect?.error
+          }`
         );
 
         if (isShuttingDown) {
