@@ -28,7 +28,7 @@ export type Message = {
 
 let dbInstance: DatabaseSync | null = null;
 
-function getDb(): DatabaseSync {
+export function getDb(): DatabaseSync {
   if (!dbInstance) {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -36,6 +36,18 @@ function getDb(): DatabaseSync {
     dbInstance = new DatabaseSync(DB_PATH);
   }
   return dbInstance;
+}
+
+export function getUnnamedGroupJids(): string[] {
+  try {
+    const db = getDb();
+    const rows = db
+      .prepare(`SELECT jid FROM chats WHERE jid LIKE '%@g.us' AND (name IS NULL OR name = '')`)
+      .all() as { jid: string }[];
+    return rows.map((r) => r.jid);
+  } catch {
+    return [];
+  }
 }
 
 export function initializeDatabase(): DatabaseSync {

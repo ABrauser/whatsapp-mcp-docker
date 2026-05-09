@@ -14,7 +14,7 @@ import path from "node:path";
 
 import {
   initializeDatabase,
-  getDb,
+  getUnnamedGroupJids,
   storeMessage,
   storeMessagesBatch,
   storeChat,
@@ -202,20 +202,16 @@ export async function startWhatsAppConnection(
         // Fetch names for group chats that have no name yet (runs once after connect)
         setTimeout(async () => {
           try {
-            const db = getDb();
-            const unnamedGroups = db
-              .prepare(`SELECT jid FROM chats WHERE jid LIKE '%@g.us' AND (name IS NULL OR name = '')`)
-              .all() as { jid: string }[];
-
-            if (unnamedGroups.length > 0) {
-              logger.info(`Fetching metadata for ${unnamedGroups.length} unnamed groups...`);
-              for (const group of unnamedGroups) {
+            const unnamedJids = getUnnamedGroupJids();
+            if (unnamedJids.length > 0) {
+              logger.info(`Fetching metadata for ${unnamedJids.length} unnamed groups...`);
+              for (const jid of unnamedJids) {
                 try {
-                  const meta = await sock.groupMetadata(group.jid);
+                  const meta = await sock.groupMetadata(jid);
                   if (meta?.subject) {
-                    storeChat({ jid: group.jid, name: meta.subject });
-                    logger.info(`[Group] Resolved name: ${group.jid} -> "${meta.subject}"`);
-                    console.log(`[Group] Resolved: ${group.jid} -> "${meta.subject}"`);
+                    storeChat({ jid, name: meta.subject });
+                    logger.info(`[Group] Resolved name: ${jid} -> "${meta.subject}"`);
+                    console.log(`[Group] Resolved: ${jid} -> "${meta.subject}"`);
                   }
                 } catch (e) {
                   // Group might be archived/left – skip silently
