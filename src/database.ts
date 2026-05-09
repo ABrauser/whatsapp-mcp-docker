@@ -429,7 +429,28 @@ export function getChats(
     let sql = `
             SELECT
                 c.jid,
-                COALESCE(c.name, ct.name, ct.notify, ct.phone_number) as name,
+                COALESCE(
+                  c.name,
+                  ct.name,
+                  CASE WHEN c.jid LIKE '%@lid' AND ct.notify IS NOT NULL THEN
+                    COALESCE(
+                      -- Try: same notify value on a @s.whatsapp.net contact
+                      (SELECT ct2.name FROM contacts ct2
+                       WHERE ct2.jid LIKE '%@s.whatsapp.net'
+                       AND ct2.notify = ct.notify
+                       AND ct2.name IS NOT NULL
+                       LIMIT 1),
+                      -- Try: @lid notify matches name of a saved @s.whatsapp.net contact
+                      (SELECT ct2.name FROM contacts ct2
+                       WHERE ct2.jid LIKE '%@s.whatsapp.net'
+                       AND LOWER(ct2.name) = LOWER(ct.notify)
+                       AND ct2.name IS NOT NULL
+                       LIMIT 1)
+                    )
+                  END,
+                  ct.notify,
+                  ct.phone_number
+                ) as name,
                 c.last_message_time
                 ${
                   includeLastMessage
@@ -478,7 +499,26 @@ export function getChat(
     let sql = `
             SELECT
                 c.jid,
-                COALESCE(c.name, ct.name, ct.notify, ct.phone_number) as name,
+                COALESCE(
+                  c.name,
+                  ct.name,
+                  CASE WHEN c.jid LIKE '%@lid' AND ct.notify IS NOT NULL THEN
+                    COALESCE(
+                      (SELECT ct2.name FROM contacts ct2
+                       WHERE ct2.jid LIKE '%@s.whatsapp.net'
+                       AND ct2.notify = ct.notify
+                       AND ct2.name IS NOT NULL
+                       LIMIT 1),
+                      (SELECT ct2.name FROM contacts ct2
+                       WHERE ct2.jid LIKE '%@s.whatsapp.net'
+                       AND LOWER(ct2.name) = LOWER(ct.notify)
+                       AND ct2.name IS NOT NULL
+                       LIMIT 1)
+                    )
+                  END,
+                  ct.notify,
+                  ct.phone_number
+                ) as name,
                 c.last_message_time
                 ${
                   includeLastMessage
@@ -575,7 +615,19 @@ export function searchDbForContacts(
     const stmt = db.prepare(`
       SELECT
         jid,
-        COALESCE(name, notify, phone_number, jid) AS display_name
+        COALESCE(
+          name,
+          CASE WHEN jid LIKE '%@lid' AND notify IS NOT NULL THEN
+            (SELECT ct2.name FROM contacts ct2
+             WHERE ct2.jid LIKE '%@s.whatsapp.net'
+             AND ct2.notify = contacts.notify
+             AND ct2.name IS NOT NULL
+             LIMIT 1)
+          END,
+          notify,
+          phone_number,
+          jid
+        ) AS display_name
       FROM contacts
       WHERE
         LOWER(COALESCE(name, notify, phone_number, jid)) LIKE LOWER(?)
