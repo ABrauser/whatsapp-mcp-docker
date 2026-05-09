@@ -14,6 +14,7 @@ import path from "node:path";
 
 import {
   initializeDatabase,
+  getDb,
   storeMessage,
   storeMessagesBatch,
   storeChat,
@@ -201,7 +202,6 @@ export async function startWhatsAppConnection(
         // Fetch names for group chats that have no name yet (runs once after connect)
         setTimeout(async () => {
           try {
-            const { getDb } = await import("./database.ts");
             const db = getDb();
             const unnamedGroups = db
               .prepare(`SELECT jid FROM chats WHERE jid LIKE '%@g.us' AND (name IS NULL OR name = '')`)
