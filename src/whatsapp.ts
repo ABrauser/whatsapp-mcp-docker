@@ -14,7 +14,6 @@ import path from "node:path";
 
 import {
   initializeDatabase,
-  getUnnamedGroupJids,
   storeMessage,
   storeMessagesBatch,
   storeChat,
@@ -199,27 +198,23 @@ export async function startWhatsAppConnection(
         logger.info(`Connection opened. WA user: ${sock.user?.name}`);
         console.log(`\n✅ WhatsApp connected as: ${sock.user?.name}\n`);
 
-        // Fetch names for group chats that have no name yet (runs once after connect)
+        // Fetch all group names once after connect (groupFetchAllParticipating is more
+        // reliable than per-group groupMetadata, especially with the @LID protocol)
         setTimeout(async () => {
           try {
-            const unnamedJids = getUnnamedGroupJids();
-            if (unnamedJids.length > 0) {
-              logger.info(`Fetching metadata for ${unnamedJids.length} unnamed groups...`);
-              for (const jid of unnamedJids) {
-                try {
-                  const meta = await sock.groupMetadata(jid);
-                  if (meta?.subject) {
-                    storeChat({ jid, name: meta.subject });
-                    logger.info(`[Group] Resolved name: ${jid} -> "${meta.subject}"`);
-                    console.log(`[Group] Resolved: ${jid} -> "${meta.subject}"`);
-                  }
-                } catch (e) {
-                  // Group might be archived/left – skip silently
-                }
+            logger.info("Fetching all group names via groupFetchAllParticipating...");
+            const allGroups = await sock.groupFetchAllParticipating();
+            let resolved = 0;
+            for (const [jid, meta] of Object.entries(allGroups)) {
+              if (meta.subject) {
+                storeChat({ jid, name: meta.subject });
+                resolved++;
               }
             }
+            logger.info(`[Group] Resolved ${resolved} group names.`);
+            console.log(`[Group] Resolved ${resolved} group names.`);
           } catch (err) {
-            logger.warn({ err }, "Error fetching group metadata on startup");
+            logger.warn({ err }, "Error fetching group names on startup");
           }
         }, 5000); // Wait 5s after connect to not overload the initial handshake
       }
