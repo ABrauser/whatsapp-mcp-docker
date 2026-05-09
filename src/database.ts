@@ -50,6 +50,19 @@ export function getUnnamedGroupJids(): string[] {
   }
 }
 
+export function getContactName(jid: string | null | undefined): string | null {
+  if (!jid) return null;
+  try {
+    const db = getDb();
+    const row = db.prepare(
+      `SELECT COALESCE(name, notify, phone_number) as display_name FROM contacts WHERE jid = ?`
+    ).get(jid) as { display_name: string | null } | undefined;
+    return row?.display_name ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function initializeDatabase(): DatabaseSync {
   const db = getDb();
 

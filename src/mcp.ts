@@ -14,6 +14,7 @@ import {
   getMessagesAround,
   searchDbForContacts,
   searchMessages,
+  getContactName,
 } from "./database.ts";
 
 import { sendWhatsAppMessage, type WhatsAppConnection } from "./whatsapp.ts";
@@ -28,13 +29,15 @@ function toLocalTime(date: Date): string {
 }
 
 function formatDbMessageForJson(msg: DbMessage) {
+  const contactName = getContactName(msg.sender);
   return {
     id: msg.id,
     chat_jid: msg.chat_jid,
     chat_name: msg.chat_name ?? "Unknown Chat",
     sender_jid: msg.sender ?? null,
+    sender_name: contactName,
     sender_display: msg.sender
-      ? msg.sender.split("@")[0]
+      ? (contactName ?? msg.sender.split("@")[0])
       : msg.is_from_me
         ? "Me"
         : "Unknown",
@@ -45,6 +48,7 @@ function formatDbMessageForJson(msg: DbMessage) {
 }
 
 function formatDbChatForJson(chat: DbChat) {
+  const senderName = getContactName(chat.last_sender);
   return {
     jid: chat.jid,
     name: chat.name ?? chat.jid.split("@")[0] ?? "Unknown Chat",
@@ -52,8 +56,9 @@ function formatDbChatForJson(chat: DbChat) {
     last_message_time: chat.last_message_time ? toLocalTime(chat.last_message_time) : null,
     last_message_preview: chat.last_message ?? null,
     last_sender_jid: chat.last_sender ?? null,
+    last_sender_name: senderName,
     last_sender_display: chat.last_sender
-      ? chat.last_sender.split("@")[0]
+      ? (senderName ?? chat.last_sender.split("@")[0])
       : chat.last_is_from_me
         ? "Me"
         : null,
