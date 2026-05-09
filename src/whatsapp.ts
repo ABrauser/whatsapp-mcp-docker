@@ -197,6 +197,35 @@ export async function startWhatsAppConnection(
         reconnectAttempts = 0; // Reset attempts on successful connection
         logger.info(`Connection opened. WA user: ${sock.user?.name}`);
         console.log(`\n✅ WhatsApp connected as: ${sock.user?.name}\n`);
+
+        // Fetch names for group chats that have no name yet (runs once after connect)
+        setTimeout(async () => {
+          try {
+            const { getDb } = await import("./database.ts");
+            const db = getDb();
+            const unnamedGroups = db
+              .prepare(`SELECT jid FROM chats WHERE jid LIKE '%@g.us' AND (name IS NULL OR name = '')`)
+              .all() as { jid: string }[];
+
+            if (unnamedGroups.length > 0) {
+              logger.info(`Fetching metadata for ${unnamedGroups.length} unnamed groups...`);
+              for (const group of unnamedGroups) {
+                try {
+                  const meta = await sock.groupMetadata(group.jid);
+                  if (meta?.subject) {
+                    storeChat({ jid: group.jid, name: meta.subject });
+                    logger.info(`[Group] Resolved name: ${group.jid} -> "${meta.subject}"`);
+                    console.log(`[Group] Resolved: ${group.jid} -> "${meta.subject}"`);
+                  }
+                } catch (e) {
+                  // Group might be archived/left – skip silently
+                }
+              }
+            }
+          } catch (err) {
+            logger.warn({ err }, "Error fetching group metadata on startup");
+          }
+        }, 5000); // Wait 5s after connect to not overload the initial handshake
       }
     }
 
@@ -317,6 +346,25 @@ export async function startWhatsAppConnection(
         "Received contacts.update event"
       );
       handleContacts(contacts);
+    }
+
+    // ─── Group name sync events ─────────────────────────────────────
+    if (events["groups.upsert"]) {
+      for (const group of events["groups.upsert"]) {
+        if (group.id && group.subject) {
+          storeChat({ jid: group.id, name: group.subject });
+          logger.info(`[Group] Upserted name: "${group.subject}" for ${group.id}`);
+        }
+      }
+    }
+
+    if (events["groups.update"]) {
+      for (const update of events["groups.update"]) {
+        if (update.id && update.subject) {
+          storeChat({ jid: update.id, name: update.subject });
+          logger.info(`[Group] Updated name: "${update.subject}" for ${update.id}`);
+        }
+      }
     }
   });
 
