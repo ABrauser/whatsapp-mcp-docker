@@ -9,6 +9,14 @@ const DATA_DIR = process.env.WHATSAPP_MCP_DATA_DIR
   : path.join(import.meta.dirname, "..", "data");
 const DB_PATH = path.join(DATA_DIR, "whatsapp.db");
 
+/**
+ * The synthetic chat WhatsApp uses for everyone's Status posts ("Stories").
+ * It contains 24-hour ephemeral content that is conceptually separate from
+ * regular 1:1 / group chats. Tools default to excluding it; callers must
+ * opt in via `includeStatus: true` or by querying the JID directly.
+ */
+export const STATUS_BROADCAST_JID = "status@broadcast";
+
 export interface Chat {
   jid: string;
   name?: string | null;
@@ -597,6 +605,7 @@ export function getRecentMessages(
   chatJid?: string | null,
   limit: number = 50,
   page: number = 0,
+  includeStatus: boolean = false,
 ): Message[] {
   const db = getDb();
   try {
@@ -620,6 +629,12 @@ export function getRecentMessages(
       sql += ` AND m.chat_jid = ?`;
       params.push(chatJid);
     }
+    // Exclude WhatsApp Status broadcasts unless the caller opted in or is
+    // explicitly filtering to that JID.
+    if (!includeStatus && chatJid !== STATUS_BROADCAST_JID) {
+      sql += ` AND m.chat_jid != ?`;
+      params.push(STATUS_BROADCAST_JID);
+    }
     sql += ` ORDER BY m.timestamp DESC LIMIT ? OFFSET ?`;
     params.push(limit, offset);
 
@@ -637,6 +652,7 @@ export function getChats(
   sortBy: "last_active" | "name" = "last_active",
   query?: string | null,
   includeLastMessage: boolean = true,
+  includeStatus: boolean = false,
 ): Chat[] {
   const db = getDb();
   try {
@@ -662,10 +678,23 @@ export function getChats(
         `;
 
     const params: (string | number)[] = [];
+    const whereClauses: string[] = [];
 
     if (query) {
-      sql += ` WHERE (LOWER(COALESCE(c.name, cr.display_name)) LIKE LOWER(?) OR c.jid LIKE ?)`;
+      whereClauses.push(
+        `(LOWER(COALESCE(c.name, cr.display_name)) LIKE LOWER(?) OR c.jid LIKE ?)`,
+      );
       params.push(`%${query}%`, `%${query}%`);
+    }
+
+    // The Status "chat" is internal-only; hide unless explicitly requested.
+    if (!includeStatus) {
+      whereClauses.push(`c.jid != ?`);
+      params.push(STATUS_BROADCAST_JID);
+    }
+
+    if (whereClauses.length > 0) {
+      sql += ` WHERE ${whereClauses.join(" AND ")}`;
     }
 
     const orderByClause =
@@ -829,6 +858,7 @@ export function searchMessages(
   chatJid?: string | null,
   limit: number = 10,
   page: number = 0,
+  includeStatus: boolean = false,
 ): Message[] {
   const db = getDb();
   try {
@@ -868,6 +898,10 @@ export function searchMessages(
     if (chatJid) {
       sql += ` AND m.chat_jid = ?`;
       params.push(chatJid);
+    }
+    if (!includeStatus && chatJid !== STATUS_BROADCAST_JID) {
+      sql += ` AND m.chat_jid != ?`;
+      params.push(STATUS_BROADCAST_JID);
     }
 
     sql += ` ORDER BY m.timestamp DESC LIMIT ? OFFSET ?`;

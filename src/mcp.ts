@@ -328,15 +328,22 @@ function createMcpServer(
         .optional()
         .default(0)
         .describe("Page number (0-indexed, default 0)"),
+      include_status: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Include WhatsApp Status broadcasts (the 'Status' tab in the WhatsApp app). Off by default — these are short-lived stories, not regular chat messages. Set to true to fetch them, or use chat_jid='status@broadcast' to query only those.",
+        ),
     },
-    async ({ hours, since, until, chat_jid, limit, page }) => {
+    async ({ hours, since, until, chat_jid, limit, page, include_status }) => {
       const cappedLimit = Math.min(limit ?? 50, 500);
       const sinceIso =
         since
           ?? new Date(Date.now() - (hours ?? 24) * 3600 * 1000).toISOString();
       const untilIso = until ?? null;
       mcpLogger.info(
-        `[MCP Tool] list_recent_messages since=${sinceIso} until=${untilIso ?? "now"} chat=${chat_jid ?? "<all>"} limit=${cappedLimit} page=${page}`,
+        `[MCP Tool] list_recent_messages since=${sinceIso} until=${untilIso ?? "now"} chat=${chat_jid ?? "<all>"} limit=${cappedLimit} page=${page} status=${include_status}`,
       );
       try {
         const messages = getRecentMessages(
@@ -345,6 +352,7 @@ function createMcpServer(
           chat_jid ?? null,
           cappedLimit,
           page,
+          include_status,
         );
         if (!messages.length) {
           return {
@@ -414,10 +422,17 @@ function createMcpServer(
         .optional()
         .default(true)
         .describe("Include last message details (default true)"),
+      include_status: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Include the synthetic 'status@broadcast' chat that holds WhatsApp Status updates. Off by default — it is not a real chat between people.",
+        ),
     },
-    async ({ limit, page, sort_by, query, include_last_message }) => {
+    async ({ limit, page, sort_by, query, include_last_message, include_status }) => {
       mcpLogger.info(
-        `[MCP Tool] Executing list_chats: limit=${limit}, page=${page}, sort=${sort_by}, query=${query}, lastMsg=${include_last_message}`,
+        `[MCP Tool] Executing list_chats: limit=${limit}, page=${page}, sort=${sort_by}, query=${query}, lastMsg=${include_last_message}, status=${include_status}`,
       );
       try {
         const chats = getChats(
@@ -426,6 +441,7 @@ function createMcpServer(
           sort_by,
           query ?? null,
           include_last_message,
+          include_status,
         );
         if (!chats.length && page === 0) {
           return {
@@ -736,14 +752,21 @@ function createMcpServer(
         .optional()
         .default(0)
         .describe("Page number (0-indexed, default 0)"),
+      include_status: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Include WhatsApp Status broadcasts in the search. Off by default. Use chat_jid='status@broadcast' to search only those.",
+        ),
     },
-    async ({ chat_jid, query, limit, page }) => {
+    async ({ chat_jid, query, limit, page, include_status }) => {
       const searchScope = chat_jid ? `in chat ${chat_jid}` : "across all chats";
       mcpLogger.info(
-        `[MCP Tool] Executing search_messages ${searchScope}, query="${query}", limit=${limit}, page=${page}`,
+        `[MCP Tool] Executing search_messages ${searchScope}, query="${query}", limit=${limit}, page=${page}, status=${include_status}`,
       );
       try {
-        const messages = searchMessages(query, chat_jid, limit, page);
+        const messages = searchMessages(query, chat_jid, limit, page, include_status);
 
         if (!messages.length && page === 0) {
           return {
