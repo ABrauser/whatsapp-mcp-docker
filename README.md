@@ -41,7 +41,26 @@ On first start, a QR code URL will appear in the logs. Open it in your browser a
 
 ### 4. Configure MCP Client
 
-Add to your MCP client configuration. The `headers` block is required when `MCP_AUTH_TOKEN` is set:
+This server speaks **Streamable HTTP** MCP (POST `/sse`), not legacy SSE. The exact config key depends on your client:
+
+**Gemini CLI** (`~/.gemini/settings.json` — the key is `httpUrl`, **not** `url`):
+
+```json
+{
+  "mcpServers": {
+    "whatsapp": {
+      "httpUrl": "http://192.168.0.101:3010/sse",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN_FROM_DOTENV"
+      }
+    }
+  }
+}
+```
+
+> ⚠️ **Common pitfall:** Using `"url"` in Gemini CLI selects the *legacy SSE* transport, which this server does not implement. You will get 401 errors that look like an auth problem but are actually a transport mismatch. Use `"httpUrl"`.
+
+**Claude Desktop / Cline / Continue / Cursor** (most use `url` for Streamable HTTP):
 
 ```json
 {
@@ -55,8 +74,6 @@ Add to your MCP client configuration. The `headers` block is required when `MCP_
   }
 }
 ```
-
-The `headers` field works in Claude Desktop, Gemini CLI, Cline, Continue, Cursor, and other clients that speak Streamable-HTTP MCP.
 
 ## Security
 
