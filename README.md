@@ -4,7 +4,7 @@ A WhatsApp MCP (Model Context Protocol) server that runs as a Docker container a
 
 ## Features
 
-- **7 MCP Tools**: search_contacts, list_messages, list_chats, get_chat, get_message_context, send_message, search_messages
+- **8 MCP Tools**: search_contacts, list_messages, list_recent_messages, list_chats, get_chat, get_message_context, send_message, search_messages
 - **Docker-first**: Runs as a container, accessible via IP
 - **Streamable HTTP Transport**: stateless MCP over HTTP POST
 - **Bearer-token auth** for `/sse` (set `MCP_AUTH_TOKEN`)
@@ -98,6 +98,7 @@ This server speaks **Streamable HTTP** MCP (POST `/sse`), not legacy SSE. The ex
 | `list_chats` | List chats sorted by activity or name |
 | `get_chat` | Get details of a specific chat |
 | `get_message_context` | Get messages around a specific message |
+| `list_recent_messages` | Cross-chat time-window query (e.g. "last 8 hours") with optional ISO `since`/`until` |
 | `send_message` | Send a text message to a user or group |
 | `search_messages` | Full-text search across messages |
 

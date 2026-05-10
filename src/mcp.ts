@@ -9,6 +9,7 @@ import {
   type Message as DbMessage,
   type Chat as DbChat,
   getMessages,
+  getRecentMessages,
   getChats,
   getChat,
   getMessagesAround,
@@ -148,13 +149,21 @@ function createMcpServer(
         .optional()
         .default(0)
         .describe("Page number (0-indexed, default 0)"),
+      since: z
+        .string()
+        .optional()
+        .describe("Optional ISO-8601 timestamp; only messages at or after this time"),
+      until: z
+        .string()
+        .optional()
+        .describe("Optional ISO-8601 timestamp; only messages at or before this time"),
     },
-    async ({ chat_jid, limit, page }) => {
+    async ({ chat_jid, limit, page, since, until }) => {
       mcpLogger.info(
-        `[MCP Tool] Executing list_messages for chat ${chat_jid}, limit=${limit}, page=${page}`,
+        `[MCP Tool] Executing list_messages for chat ${chat_jid}, limit=${limit}, page=${page}, since=${since ?? "-"}, until=${until ?? "-"}`,
       );
       try {
-        const messages = getMessages(chat_jid, limit, page);
+        const messages = getMessages(chat_jid, limit, page, since, until);
         if (!messages.length && page === 0) {
           return {
             content: [
@@ -190,6 +199,102 @@ function createMcpServer(
             {
               type: "text",
               text: `Error listing messages for ${chat_jid}: ${error.message}`,
+            },
+          ],
+        };
+      }
+    },
+  );
+
+  // ─── Tool: list_recent_messages ───────────────────────────────────
+  // Cross-chat time-window query — designed for agent prompts like
+  //   "show me the last 8 hours of WhatsApp activity"
+  // without needing one tool call per chat.
+  server.tool(
+    "list_recent_messages",
+    {
+      hours: z
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          "How many hours back from now to include. Mutually exclusive with `since`. Defaults to 24 if neither is set.",
+        ),
+      since: z
+        .string()
+        .optional()
+        .describe(
+          "ISO-8601 lower bound (inclusive). If set, overrides `hours`.",
+        ),
+      until: z
+        .string()
+        .optional()
+        .describe("ISO-8601 upper bound (inclusive). Defaults to now."),
+      chat_jid: z
+        .string()
+        .optional()
+        .describe("Optional: restrict to a single chat JID."),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .default(50)
+        .describe("Max messages per page (default 50, hard-capped at 500)"),
+      page: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .default(0)
+        .describe("Page number (0-indexed, default 0)"),
+    },
+    async ({ hours, since, until, chat_jid, limit, page }) => {
+      const cappedLimit = Math.min(limit ?? 50, 500);
+      const sinceIso =
+        since
+          ?? new Date(Date.now() - (hours ?? 24) * 3600 * 1000).toISOString();
+      const untilIso = until ?? null;
+      mcpLogger.info(
+        `[MCP Tool] list_recent_messages since=${sinceIso} until=${untilIso ?? "now"} chat=${chat_jid ?? "<all>"} limit=${cappedLimit} page=${page}`,
+      );
+      try {
+        const messages = getRecentMessages(
+          sinceIso,
+          untilIso,
+          chat_jid ?? null,
+          cappedLimit,
+          page,
+        );
+        if (!messages.length) {
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  page === 0
+                    ? `No messages found between ${sinceIso} and ${untilIso ?? "now"}${chat_jid ? ` in chat ${chat_jid}` : ""}.`
+                    : `No more messages on page ${page}.`,
+              },
+            ],
+          };
+        }
+        const formatted = messages.map(formatDbMessageForJson);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(formatted, null, 2) },
+          ],
+        };
+      } catch (error: any) {
+        mcpLogger.error(
+          `[MCP Tool Error] list_recent_messages failed: ${error.message}`,
+        );
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Error listing recent messages: ${error.message}`,
             },
           ],
         };

@@ -526,11 +526,13 @@ export function getMessages(
   chatJid: string,
   limit: number = 20,
   page: number = 0,
+  sinceIso?: string | null,
+  untilIso?: string | null,
 ): Message[] {
   const db = getDb();
   try {
     const offset = page * limit;
-    const stmt = db.prepare(`
+    let sql = `
             SELECT m.*,
               c.name as chat_name,
               COALESCE(ct.name, ct.notify, ct.phone_number) as sender_name
@@ -538,14 +540,68 @@ export function getMessages(
             JOIN chats c ON m.chat_jid = c.jid
             LEFT JOIN contacts ct ON m.sender = ct.jid
             WHERE m.chat_jid = ?
-            ORDER BY m.timestamp DESC
-            LIMIT ?
-            OFFSET ?
-        `);
-    const rows = stmt.all(chatJid, limit, offset) as any[];
+        `;
+    const params: (string | number)[] = [chatJid];
+    if (sinceIso) {
+      sql += ` AND m.timestamp >= ?`;
+      params.push(sinceIso);
+    }
+    if (untilIso) {
+      sql += ` AND m.timestamp <= ?`;
+      params.push(untilIso);
+    }
+    sql += ` ORDER BY m.timestamp DESC LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
+
+    const rows = db.prepare(sql).all(...params) as any[];
     return rows.map(rowToMessage);
   } catch (error) {
     console.error("Error getting messages:", error);
+    return [];
+  }
+}
+
+/**
+ * Cross-chat time-window query. Returns the most recent N messages across ALL
+ * chats (or filtered to a chat) within the [since, until] window. Useful for
+ * agent queries like "show me the last 8 hours of WhatsApp activity".
+ */
+export function getRecentMessages(
+  sinceIso: string,
+  untilIso?: string | null,
+  chatJid?: string | null,
+  limit: number = 50,
+  page: number = 0,
+): Message[] {
+  const db = getDb();
+  try {
+    const offset = page * limit;
+    let sql = `
+            SELECT m.*,
+              COALESCE(c.name, ct_chat.name, ct_chat.notify, ct_chat.phone_number) as chat_name,
+              COALESCE(ct_sender.name, ct_sender.notify, ct_sender.phone_number) as sender_name
+            FROM messages m
+            JOIN chats c ON m.chat_jid = c.jid
+            LEFT JOIN contacts ct_chat ON c.jid = ct_chat.jid
+            LEFT JOIN contacts ct_sender ON m.sender = ct_sender.jid
+            WHERE m.timestamp >= ?
+        `;
+    const params: (string | number)[] = [sinceIso];
+    if (untilIso) {
+      sql += ` AND m.timestamp <= ?`;
+      params.push(untilIso);
+    }
+    if (chatJid) {
+      sql += ` AND m.chat_jid = ?`;
+      params.push(chatJid);
+    }
+    sql += ` ORDER BY m.timestamp DESC LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
+
+    const rows = db.prepare(sql).all(...params) as any[];
+    return rows.map(rowToMessage);
+  } catch (error) {
+    console.error("Error getting recent messages:", error);
     return [];
   }
 }
