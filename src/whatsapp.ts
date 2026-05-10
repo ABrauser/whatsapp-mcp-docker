@@ -296,13 +296,31 @@ export async function startWhatsAppConnection(
       );
 
       const parsedMessages: DbMessage[] = [];
+      // Collect distinct (jid, pushName) pairs from history so we can backfill
+      // `notify` on @s.whatsapp.net contacts in one pass — this is what makes
+      // the @lid → @s fuzzy-match work without any manual override.
+      const pushNameMap = new Map<string, string>();
       messages.forEach((msg) => {
+        if (msg.pushName && !msg.key.fromMe) {
+          const sJid = msg.key.participant ?? msg.key.remoteJid;
+          if (sJid && sJid.endsWith("@s.whatsapp.net")) {
+            const norm = jidNormalizedUser(sJid);
+            if (!pushNameMap.has(norm)) pushNameMap.set(norm, msg.pushName);
+          }
+        }
         const parsed = parseMessageForDb(msg);
         if (parsed) {
           parsedMessages.push(parsed);
         }
       });
-      
+
+      for (const [jid, notify] of pushNameMap) {
+        storeContact({ jid, notify });
+      }
+      if (pushNameMap.size > 0) {
+        logger.info(`[Auto-link] Captured pushName for ${pushNameMap.size} contacts from history sync.`);
+      }
+
       if (parsedMessages.length > 0) {
         storeMessagesBatch(parsedMessages);
       }
@@ -318,6 +336,21 @@ export async function startWhatsAppConnection(
 
       if (type === "notify" || type === "append") {
         for (const msg of messages) {
+          // ── Auto-link @lid ↔ @s.whatsapp.net via pushName ────────────
+          // Every incoming message carries the sender's pushName. Store it
+          // as `notify` on their @s.whatsapp.net contact row so the existing
+          // fuzzy-match in getChats() can find their address-book name when
+          // the same person appears under @lid in groups/status updates.
+          if (msg.pushName && !msg.key.fromMe) {
+            const senderJid = msg.key.participant ?? msg.key.remoteJid;
+            if (senderJid && senderJid.endsWith("@s.whatsapp.net")) {
+              storeContact({
+                jid: jidNormalizedUser(senderJid),
+                notify: msg.pushName,
+              });
+            }
+          }
+
           const parsed = parseMessageForDb(msg);
           if (parsed) {
             // Content snippets are user data — keep them at debug only.

@@ -75,9 +75,17 @@ This server speaks **Streamable HTTP** MCP (POST `/sse`), not legacy SSE. The ex
 }
 ```
 
-## Contact Name Overrides
+## Contact Name Resolution
 
-WhatsApp Web (Baileys) does not always sync your phone-side address book. If a contact appears under their *push name* (what they set themselves) instead of the name you saved on your phone, you can override the display name with a JSON file:
+WhatsApp Web (Baileys) does not give us your phone-side address book directly. To still show *your* saved names — not the contact's self-chosen push names — the server uses three layers, in this order:
+
+1. **Manual override** (`contact_overrides.json`, see below) — wins everything.
+2. **Auto-linking** — every incoming message's `pushName` is captured and stored as the `notify` of the corresponding `@s.whatsapp.net` contact. This lets the existing fuzzy-match in queries automatically connect the `@lid` form (used in groups & status updates) to the `@s.whatsapp.net` row that holds your saved address-book name. After enough message activity, most contacts resolve themselves.
+3. **Fallback** — `name` → `notify` → phone digits → JID.
+
+### Manual overrides (`contact_overrides.json`)
+
+Use this **only** for contacts that auto-linking can't fix (e.g. a contact who has never written you directly, or whose push name and saved name are completely different and the fuzzy match doesn't catch it).
 
 Path: `<data dir>/contact_overrides.json` (typically `/opt/docker/whatsapp-mcp/data/contact_overrides.json` on the host)
 
