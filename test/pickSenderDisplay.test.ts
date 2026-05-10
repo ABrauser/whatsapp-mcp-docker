@@ -29,24 +29,26 @@ test("override beats saved name", () => {
   );
 });
 
-test("saved name returned when present and != push name", () => {
+test("saved name returned when fuzzy finds no upgrade", () => {
+  // savedName runs through fuzzy; with default mock returning null, the
+  // savedName itself is returned unchanged.
   assert.equal(
     pickSenderDisplay(opts({ savedName: "Joe Beck", pushName: "🔥 Joe 🔥" })),
     "Joe Beck",
   );
 });
 
-test("Mary Bauer case: saved name == push name → fuzzy upgrade", () => {
-  // The view fell through to notify, so saved_name = "Mary Grace Bauer"
-  // (which is also the pushName). Fuzzy must run and find "Mary Bauer".
+test("Mary Bauer case: notify-fallback view + present pushName → fuzzy upgrade", () => {
+  // Live message: view fell through to notify, savedName = pushName.
+  // Fuzzy must find the unique saved "Mary Bauer" and return it.
   let fuzzyCalls = 0;
   const display = pickSenderDisplay(
     opts({
       savedName: "Mary Grace Bauer",
       pushName: "Mary Grace Bauer",
-      fuzzy: (push) => {
+      fuzzy: (cand) => {
         fuzzyCalls++;
-        assert.equal(push, "Mary Grace Bauer");
+        assert.equal(cand, "Mary Grace Bauer");
         return { name: "Mary Bauer" };
       },
     }),
@@ -55,23 +57,25 @@ test("Mary Bauer case: saved name == push name → fuzzy upgrade", () => {
   assert.equal(fuzzyCalls, 1);
 });
 
-test("notify-fallback signal is case-insensitive and trim-tolerant", () => {
-  let calls = 0;
-  pickSenderDisplay(
+test("Mary Bauer regression: legacy message with NULL pushName still resolves", () => {
+  // The bug we are fixing: old messages have sender_push_name=NULL because
+  // they predate that column. Previously the looksLikeNotifyFallback
+  // heuristic could not detect the notify-fallback shape and returned the
+  // notify string verbatim. The new behavior: fuzzy ALWAYS runs on the
+  // candidate, so the notify string is upgraded regardless of pushName.
+  const display = pickSenderDisplay(
     opts({
-      savedName: "  TamTam  ",
-      pushName: "tamtam",
-      fuzzy: () => {
-        calls++;
-        return null;
-      },
+      savedName: "Mary Grace Bauer",
+      pushName: null,
+      fuzzy: () => ({ name: "Mary Bauer" }),
     }),
   );
-  assert.equal(calls, 1, "fuzzy should still be called despite casing/whitespace");
+  assert.equal(display, "Mary Bauer");
 });
 
-test("notify-fallback + fuzzy returns null → falls back to push name", () => {
-  // Tammy case: saved 'Tammy' has 1 token → fuzzy refuses to match → use push name.
+test("Tammy fallback: 1-token saved name cannot be fuzzy-matched", () => {
+  // Saved 'Tammy' has 1 token → fuzzy resolver refuses (false-positive guard).
+  // Display falls back to whatever the view produced.
   const display = pickSenderDisplay(
     opts({
       savedName: "TamTam",
@@ -119,18 +123,35 @@ test("no sender info at all → 'Unknown'", () => {
   assert.equal(pickSenderDisplay(opts()), "Unknown");
 });
 
-test("real saved name beats fuzzy when not in notify-fallback shape", () => {
-  let calls = 0;
+test("fuzzy is idempotent for genuine saved names: lookup returns same name", () => {
+  // For a real saved address-book name, the fuzzy resolver returns a
+  // self-match (savedName has ≥2 tokens and is the only contact whose
+  // tokens are a subset of itself). The display equals savedName.
   const display = pickSenderDisplay(
     opts({
-      savedName: "Alice",
-      pushName: "Different Name",
-      fuzzy: () => {
-        calls++;
-        return { name: "Whatever" };
+      savedName: "Alice Smith",
+      pushName: "alice s",
+      fuzzy: (cand) => {
+        assert.equal(cand, "Alice Smith");
+        return { name: "Alice Smith" };
       },
     }),
   );
-  assert.equal(display, "Alice");
-  assert.equal(calls, 0, "fuzzy must not run when saved name is genuine");
+  assert.equal(display, "Alice Smith");
+});
+
+test("savedName takes priority over pushName as the candidate", () => {
+  // Even when both are set, fuzzy is run on savedName, not pushName.
+  let received: string | null = null;
+  pickSenderDisplay(
+    opts({
+      savedName: "Saved",
+      pushName: "Push",
+      fuzzy: (cand) => {
+        received = cand;
+        return null;
+      },
+    }),
+  );
+  assert.equal(received, "Saved");
 });

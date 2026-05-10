@@ -134,4 +134,27 @@ export const APP_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 4,
+    description:
+      "create lid_aliases table mapping @lid identifiers to @s.whatsapp.net JIDs",
+    up(db) {
+      // WhatsApp's group messages carry both `key.participant` (an opaque
+      // @lid identifier) and `key.participantPn` (the phone-number-form
+      // @s.whatsapp.net JID for the same person). Persisting this mapping
+      // lets contacts_resolved deterministically link @lid contacts to the
+      // user's saved address-book entries (which are keyed by @s JID),
+      // without relying on fragile notify-string heuristics.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS lid_aliases (
+          lid_jid TEXT PRIMARY KEY,
+          s_jid   TEXT NOT NULL,
+          first_seen TEXT NOT NULL
+        );
+      `);
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_lid_aliases_s_jid ON lid_aliases(s_jid);`,
+      );
+    },
+  },
 ];

@@ -40,14 +40,16 @@ function toLocalTime(date: Date): string {
  * Priority (high → low):
  *   1. is_from_me → "Me"
  *   2. manual override on the sender JID
- *   3. saved name from the contacts_resolved view (real address-book name).
- *      EXCEPTION: if the saved name equals the captured push name
- *      (case-insensitive), the view fell through to notify; try fuzzy
- *      first to see if there is a unique address-book entry that matches.
- *   4. fuzzy word-overlap match on push name → unique saved name
- *   5. raw push name (always populated for non-fromMe messages)
- *   6. JID prefix when sender is set but everything else is null
- *   7. "Unknown" — no sender JID and no push name (system messages)
+ *   3. resolved candidate (savedName from the contacts_resolved view, or push
+ *      name when no view result) → run through fuzzy as a last-line defense.
+ *      Fuzzy is idempotent for genuine saved names (e.g. "Mary Bauer" → "Mary
+ *      Bauer") and only changes the value when there is a unique address-book
+ *      upgrade (e.g. notify-fallback "Mary Grace Bauer" → saved "Mary Bauer").
+ *      This handles the case where the view fell through to a notify string
+ *      AND we cannot detect that fall-through (e.g. legacy messages with
+ *      sender_push_name=NULL because they pre-date that column).
+ *   4. JID prefix when sender is set but everything else is null
+ *   5. "Unknown" — no sender JID and no push name (system messages)
  */
 export function pickSenderDisplay(opts: {
   isFromMe: boolean;
@@ -55,33 +57,16 @@ export function pickSenderDisplay(opts: {
   savedName: string | null;
   pushName: string | null;
   senderJid: string | null;
-  fuzzy: (pushName: string) => { name: string } | null;
+  fuzzy: (candidate: string) => { name: string } | null;
 }): string {
   if (opts.isFromMe) return "Me";
   if (opts.override) return opts.override;
 
-  const { savedName, pushName } = opts;
-
-  // If the saved name equals the push name (case-insensitive, trimmed), the
-  // contacts_resolved view fell through to notify. Try fuzzy to upgrade to
-  // a real saved address-book name.
-  const looksLikeNotifyFallback =
-    !!savedName &&
-    !!pushName &&
-    savedName.trim().toLowerCase() === pushName.trim().toLowerCase();
-
-  if (looksLikeNotifyFallback && pushName) {
-    const fuzzy = opts.fuzzy(pushName);
+  const candidate = opts.savedName ?? opts.pushName;
+  if (candidate) {
+    const fuzzy = opts.fuzzy(candidate);
     if (fuzzy) return fuzzy.name;
-    return pushName;
-  }
-
-  if (savedName) return savedName;
-
-  if (pushName) {
-    const fuzzy = opts.fuzzy(pushName);
-    if (fuzzy) return fuzzy.name;
-    return pushName;
+    return candidate;
   }
 
   if (opts.senderJid) return opts.senderJid.split("@")[0] ?? opts.senderJid;

@@ -4,10 +4,19 @@ import fs from "node:fs";
 import { runMigrations, APP_MIGRATIONS } from "./migrations.ts";
 import { invalidateContactResolverCache } from "./contactResolver.ts";
 
-const DATA_DIR = process.env.WHATSAPP_MCP_DATA_DIR
-  ? path.resolve(process.env.WHATSAPP_MCP_DATA_DIR)
-  : path.join(import.meta.dirname, "..", "data");
-const DB_PATH = path.join(DATA_DIR, "whatsapp.db");
+/**
+ * Resolved lazily on every getDb() so tests can swap WHATSAPP_MCP_DATA_DIR
+ * after import and still hit a per-test temp directory. Using a single
+ * shared default for production code paths kept the previous behavior.
+ */
+function getDataDir(): string {
+  return process.env.WHATSAPP_MCP_DATA_DIR
+    ? path.resolve(process.env.WHATSAPP_MCP_DATA_DIR)
+    : path.join(import.meta.dirname, "..", "data");
+}
+function getDbPath(): string {
+  return path.join(getDataDir(), "whatsapp.db");
+}
 
 /**
  * The synthetic chat WhatsApp uses for everyone's Status posts ("Stories").
@@ -50,10 +59,11 @@ let dbInstance: DatabaseSync | null = null;
 
 export function getDb(): DatabaseSync {
   if (!dbInstance) {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+    const dataDir = getDataDir();
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
     }
-    dbInstance = new DatabaseSync(DB_PATH);
+    dbInstance = new DatabaseSync(getDbPath());
   }
   return dbInstance;
 }
@@ -208,7 +218,21 @@ export function initializeDatabase(): DatabaseSync {
         ct.notify AS notify,
         ct.phone_number AS phone_number,
         COALESCE(
+          -- 1. Direct saved address-book name on this row.
           ct.name,
+          -- 2. For @lid rows: deterministic JOIN through lid_aliases to the
+          --    @s.whatsapp.net contact whose JID was provided alongside this
+          --    @lid in a Baileys message envelope (key.participantPn). This is
+          --    the canonical mapping; takes precedence over notify heuristics.
+          CASE WHEN ct.jid LIKE '%@lid' THEN
+            (SELECT cs.name FROM lid_aliases la
+              JOIN contacts cs ON cs.jid = la.s_jid
+              WHERE la.lid_jid = ct.jid
+                AND cs.name IS NOT NULL
+                AND TRIM(cs.name) != ''
+              LIMIT 1)
+          END,
+          -- 3. Legacy fallback: @s contact whose notify equals this @lid notify.
           CASE WHEN ct.jid LIKE '%@lid' AND ct.notify IS NOT NULL THEN
             (SELECT ct2.name FROM contacts ct2
              WHERE ct2.jid LIKE '%@s.whatsapp.net'
@@ -216,6 +240,7 @@ export function initializeDatabase(): DatabaseSync {
                AND ct2.name IS NOT NULL
              LIMIT 1)
           END,
+          -- 4. Legacy fallback: @s contact whose saved name equals this @lid notify.
           CASE WHEN ct.jid LIKE '%@lid' AND ct.notify IS NOT NULL THEN
             (SELECT ct2.name FROM contacts ct2
              WHERE ct2.jid LIKE '%@s.whatsapp.net'
@@ -932,6 +957,33 @@ export function closeDatabase(): void {
 function phoneFromJid(jid: string): string | null {
   const m = jid.match(/^(\d+)@s\.whatsapp\.net$/);
   return m ? m[1] : null;
+}
+
+/**
+ * Persist the deterministic mapping that Baileys exposes in every group
+ * message envelope: `key.participant` is an @lid identifier and
+ * `key.participantPn` is the same person's phone-number-form
+ * @s.whatsapp.net JID. Capturing this lets contacts_resolved link the @lid
+ * row to the user's saved address-book entry without notify-string heuristics.
+ *
+ * Idempotent: subsequent calls for the same lid_jid are ignored.
+ */
+export function storeLidAlias(lidJid: string, sJid: string): void {
+  if (!lidJid.endsWith("@lid") || !sJid.endsWith("@s.whatsapp.net")) {
+    return;
+  }
+  const db = getDb();
+  try {
+    db.prepare(
+      `INSERT OR IGNORE INTO lid_aliases (lid_jid, s_jid, first_seen) VALUES (?, ?, ?)`,
+    ).run(lidJid, sJid, new Date().toISOString());
+    // Linking changed; the fuzzy cache is keyed on saved names, but the
+    // contacts_resolved view will now return different display strings for
+    // affected @lid contacts. Drop the cache so the resolver re-reads.
+    invalidateContactResolverCache();
+  } catch (error) {
+    console.error("Error storing lid alias:", error);
+  }
 }
 
 export function storeContact(contact: {

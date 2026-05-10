@@ -18,10 +18,49 @@ import {
   storeMessagesBatch,
   storeChat,
   storeContact,
+  storeLidAlias,
   debugLidMapping,
   scheduleLidMigration,
   type Message as DbMessage,
 } from "./database.ts";
+
+/**
+ * Extract a deterministic @lid ↔ @s.whatsapp.net mapping from a Baileys
+ * message key. Returns null if the key does not carry both forms.
+ *
+ * WhatsApp's protocol surfaces this in three different field pairs depending
+ * on the message kind (group vs 1:1, history sync vs live). Try each in
+ * order; first match wins.
+ */
+function extractLidAlias(
+  key: WAMessage["key"] | undefined | null,
+): { lid: string; s: string } | null {
+  if (!key) return null;
+  // Group messages: key.participant is the @lid, key.participantPn is the
+  // matching @s.whatsapp.net JID.
+  if (
+    key.participant?.endsWith("@lid") &&
+    key.participantPn?.endsWith("@s.whatsapp.net")
+  ) {
+    return { lid: jidNormalizedUser(key.participant), s: jidNormalizedUser(key.participantPn) };
+  }
+  // Some envelopes carry participantLid + participantPn explicitly.
+  if (
+    key.participantLid?.endsWith("@lid") &&
+    key.participantPn?.endsWith("@s.whatsapp.net")
+  ) {
+    return { lid: jidNormalizedUser(key.participantLid), s: jidNormalizedUser(key.participantPn) };
+  }
+  // 1:1 chats use senderLid + senderPn for incoming messages from accounts
+  // that are still on @lid.
+  if (
+    key.senderLid?.endsWith("@lid") &&
+    key.senderPn?.endsWith("@s.whatsapp.net")
+  ) {
+    return { lid: jidNormalizedUser(key.senderLid), s: jidNormalizedUser(key.senderPn) };
+  }
+  return null;
+}
 
 const AUTH_DIR = process.env.WHATSAPP_AUTH_DIR
   ? path.resolve(process.env.WHATSAPP_AUTH_DIR)
@@ -308,6 +347,7 @@ export async function startWhatsAppConnection(
       // `notify` on @s.whatsapp.net contacts in one pass — this is what makes
       // the @lid → @s fuzzy-match work without any manual override.
       const pushNameMap = new Map<string, string>();
+      const aliasMap = new Map<string, string>(); // lid -> s
       messages.forEach((msg) => {
         if (msg.pushName && !msg.key.fromMe) {
           const sJid = msg.key.participant ?? msg.key.remoteJid;
@@ -316,6 +356,8 @@ export async function startWhatsAppConnection(
             if (!pushNameMap.has(norm)) pushNameMap.set(norm, msg.pushName);
           }
         }
+        const a = extractLidAlias(msg.key);
+        if (a && !aliasMap.has(a.lid)) aliasMap.set(a.lid, a.s);
         const parsed = parseMessageForDb(msg);
         if (parsed) {
           parsedMessages.push(parsed);
@@ -327,6 +369,13 @@ export async function startWhatsAppConnection(
       }
       if (pushNameMap.size > 0) {
         logger.info(`[Auto-link] Captured pushName for ${pushNameMap.size} contacts from history sync.`);
+      }
+
+      for (const [lid, s] of aliasMap) {
+        storeLidAlias(lid, s);
+      }
+      if (aliasMap.size > 0) {
+        logger.info(`[Auto-link] Captured ${aliasMap.size} @lid → @s aliases from history sync.`);
       }
 
       if (parsedMessages.length > 0) {
@@ -344,6 +393,15 @@ export async function startWhatsAppConnection(
 
       if (type === "notify" || type === "append") {
         for (const msg of messages) {
+          // ── Capture deterministic @lid ↔ @s mapping from the envelope ────
+          // WhatsApp ships both identifiers in every group message key.
+          // Persisting the pair lets contacts_resolved deterministically link
+          // the @lid contact to the user's saved address-book entry.
+          const alias = extractLidAlias(msg.key);
+          if (alias) {
+            storeLidAlias(alias.lid, alias.s);
+          }
+
           // ── Auto-link @lid ↔ @s.whatsapp.net via pushName ────────────
           // Every incoming message carries the sender's pushName. Store it
           // as `notify` on their @s.whatsapp.net contact row so the existing
