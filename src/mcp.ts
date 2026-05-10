@@ -614,21 +614,38 @@ export async function startMcpServer(
   }
 
   // ─── Bearer-token auth middleware (only on /sse) ─────────────
+  // Tolerant of:
+  //   - "Bearer", "bearer", "BEARER" (RFC 6750 says scheme is case-insensitive)
+  //   - leading/trailing whitespace in the header value
+  // Strict on the token bytes themselves (no trimming of the token).
   const requireAuth = (req: Request, res: Response, next: () => void) => {
     if (!AUTH_TOKEN) return next();
-    const hdr = req.header("authorization") || "";
-    const expected = `Bearer ${AUTH_TOKEN}`;
-    // Constant-time-ish compare (Node has no native, but length check first).
-    if (hdr.length !== expected.length || hdr !== expected) {
-      mcpLogger.warn(`Unauthorized ${req.method} ${req.path} from ${req.ip}`);
-      res.status(401).json({
-        jsonrpc: "2.0",
-        error: { code: -32001, message: "Unauthorized" },
-        id: null,
-      });
+    const raw = (req.header("authorization") || "").trim();
+    const m = raw.match(/^Bearer\s+(.+)$/i);
+    const provided = m?.[1];
+
+    if (provided === AUTH_TOKEN) {
+      next();
       return;
     }
-    next();
+
+    // Helpful diagnostic log without leaking the full secret.
+    const tokenHint = (s: string | undefined | null) =>
+      !s ? "<missing>" : `${s.slice(0, 4)}…${s.slice(-4)} (len=${s.length})`;
+    const reason = !raw
+      ? "no Authorization header"
+      : !m
+        ? `bad scheme (got: \"${raw.slice(0, 16)}…\")`
+        : "token mismatch";
+    mcpLogger.warn(
+      `Unauthorized ${req.method} ${req.path} from ${req.ip} — ${reason}; ` +
+        `provided=${tokenHint(provided)} expected=${tokenHint(AUTH_TOKEN)}`
+    );
+    res.status(401).json({
+      jsonrpc: "2.0",
+      error: { code: -32001, message: "Unauthorized" },
+      id: null,
+    });
   };
 
   // ─── Health check endpoint ──────────────────────────────────────
