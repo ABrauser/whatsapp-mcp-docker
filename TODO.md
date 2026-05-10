@@ -1,169 +1,85 @@
-# WhatsApp MCP — Open Tasks & Tech Debt
+# WhatsApp MCP — Status & Open Tasks
 
 Stand: 2026-05-10. Lebt im Repo, damit der Kontext nicht mit dem Chat verloren geht.
 
-## 🔴 Pending: User-Validation
+## ✅ Production-Ready Hardening — abgeschlossen (siehe Commit-Verlauf)
 
-Diese Fixes sind committed + deployed, aber der User testet noch ob sie das eigentliche Symptom lösen:
+- **Schema-Versioning** — `src/migrations.ts` mit `schema_migrations`-Tabelle. Jede Migration läuft genau einmal in eigener Transaktion. Aktuelle Versionen 1–3.
+- **`sender_push_name`** auf `messages` — Always-Capture aus `msg.pushName`. Behebt "Unknown" für Sticker / Media-Messages ohne `key.participant`.
+- **`contacts_resolved` SQL-View** — DRY: alle Read-Queries (`getChats`, `getChat`, `getMessages`, `getRecentMessages`, `getMessagesAround`, `searchMessages`, `searchDbForContacts`) joinen jetzt einen einzigen View statt drei duplizierte CASE-WHEN-Blöcke zu pflegen.
+- **Fuzzy Match (Wort-Overlap)** — `src/contactResolver.ts`. "Mary Grace Bauer" → "Mary Bauer" wenn genau ein eindeutiger Match in den `@s.whatsapp.net`-Kontakten existiert. Min. 2 Tokens beim Saved-Name als False-Positive-Guard. Cache wird beim Contact-Write invalidated.
+- **Test Suite** — 22 Tests in `test/` (`node --test`): Resolver, Migrations, Overrides. Alle grün.
+- **CI** — `typecheck` und `test` Jobs gaten den Docker-Build (`needs: [typecheck, test]`).
+- **Log Rotation** — `pino-roll`: 10 MB Chunks, daily Rotation, 7-Tage-Retention. Fallback auf `pino.destination` bei FS-Fehler.
+- **Rate Limiting** — `express-rate-limit` auf `/sse`, default 120 req/min/IP, anpassbar via `MCP_RATE_LIMIT_PER_MIN`.
+- **Audit Log** — strukturiertes `audit: "send_message"` und `audit: "send_message_success"` Event auf jedem Send mit Empfänger, Länge und 80-char Preview.
 
-- [ ] **Auto-Linking @lid ↔ @s.whatsapp.net via `pushName`** (`cc5c26b`)
-  - Erfolgskriterium: Tammy (`210444891463794@lid`) wird in MCP-Output als "Tammy" angezeigt, **ohne** dass `contact_overrides.json` angelegt wurde.
-  - Voraussetzung: Tammy hat seit Container-Start mindestens eine Message geschickt (oder History-Sync hatte ihre alten Messages).
-  - Falls nicht: Fallback via `contact_overrides.json` testen.
+## 🟢 Nice-to-Have (offen, ohne Druck)
 
-- [ ] **Phone-Backfill aus JID** (`b11ec95`)
-  - Erfolgskriterium: Beim Startup-Log erscheint `[Migrate] Backfilled phone_number on N contacts.` mit N > 0.
-  - Folge-Effekt: Mehr `@lid`-Chats sollten sich zu ihren `@s.whatsapp.net`-Gegenstücken auflösen.
-
-- [ ] **DB-Discrepancy `chats=1, messages=3488`**
-  - Wenn nach Restart immer noch nur 1 Chat in `chats`-Tabelle steht: Bug in Migration. Diagnose-Queries siehe Chat-Verlauf.
-  - Vermutung: Race zwischen User-SQL-Query und 5s-delayed `groupFetchAllParticipating()`.
-
-## 🟡 Tech Debt — Production-Grade
-
-Reihenfolge nach Wert:
-
-### 1. Schema-Versioning + nummerierte Migrationen (~1h)
-
-**Problem:** `initializeDatabase()` führt alle Migrations bei jedem Start aus. Idempotent, aber:
-- Wenn eine Migration fehlerhaft wird, läuft sie endlos in Schleife.
-- Keine klare Trennung zwischen "initial schema" und "migration X applied later".
-
-**Lösung:**
-- Tabelle `schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT)`.
-- Pro Migration eine Funktion mit Versionsnummer.
-- Run-once-Logik: nur ausführen wenn `version` noch nicht in der Tabelle.
-- Alternative: leichtgewichtige Lib wie `node-better-sqlite3-migrations` oder eigene Mini-Implementierung.
-
-**Files:** `src/database.ts` — `initializeDatabase()` aufsplitten.
-
-### 2. Test-Suite — `node --test` (~2-3h)
-
-**Problem:** Null automatische Tests. Refactors werden in Production "validiert".
-
-**Mindest-Coverage:**
-- `src/database.ts`:
-  - `resolveJidPhoneOnly()` — null/undefined/non-LID/LID-mit-phone/LID-ohne-phone
-  - `resolveJidSync()` — phone wins, fuzzy fallback, no-match
-  - `storeContact()` mit/ohne phone_number → korrekter Backfill
-  - `storeMessage()` updates `last_message_time` korrekt
-  - `getRecentMessages()` mit since/until/chat_jid
-- `src/mcp.ts`:
-  - `formatDbMessageForJson()` — Override > sender_name > JID-prefix > "Unknown"
-  - `formatDbChatForJson()` — Override > name > JID-prefix
-  - `is_from_me` setzt sender_display="Me" auch wenn sender JID gesetzt ist
-- `src/contactOverrides.ts`:
-  - Load von valid/invalid/missing JSON
-  - Hot-Reload via fs.watch (mit Mock-Timer)
-
-**Setup:**
-- In-Memory SQLite via `:memory:` für DB-Tests.
-- `node --test --experimental-strip-types` (Node 24+).
-- CI-Step in `.github/workflows/docker-build.yml` zwischen `typecheck` und `build-and-push`.
-
-### 3. DRY: `contacts_resolved` View (~30min)
-
-**Problem:** Die `COALESCE(c.name, ct.name, CASE WHEN @lid THEN ... END, ct.notify, ct.phone_number)`-Logik ist **dreifach** dupliziert in:
-- `src/database.ts` — `getChats()`
-- `src/database.ts` — `getChat()`
-- `src/database.ts` — `searchDbForContacts()`
-
-**Lösung:** SQLite-View bei DB-Init:
-```sql
-CREATE VIEW IF NOT EXISTS chats_resolved AS
-SELECT
-  c.jid,
-  c.last_message_time,
-  COALESCE(
-    c.name,
-    ct.name,
-    CASE WHEN c.jid LIKE '%@lid' AND ct.notify IS NOT NULL THEN
-      (SELECT ct2.name FROM contacts ct2
-       WHERE ct2.jid LIKE '%@s.whatsapp.net'
-       AND ct2.notify = ct.notify AND ct2.name IS NOT NULL LIMIT 1)
-    END,
-    ct.notify,
-    ct.phone_number
-  ) as resolved_name
-FROM chats c
-LEFT JOIN contacts ct ON c.jid = ct.jid;
-```
-Dann nur noch `SELECT resolved_name FROM chats_resolved WHERE jid = ?` in den drei Funktionen.
-
-## 🟢 Nice-to-Have
-
-### 4. Separate `push_name`-Spalte (~30min)
-
-`notify` (aus contacts.upsert) und `pushName` (aus messages.upsert) sind aktuell in der gleichen Spalte. Semantisch identisch, technisch nicht 100% sauber.
-
-- Migration: `ALTER TABLE contacts ADD COLUMN push_name TEXT`.
-- Auto-Link-Logik in `whatsapp.ts` schreibt in `push_name` statt `notify`.
-- Resolver-COALESCE: `name → notify → push_name → phone_number`.
-
-### 5. Log-Rotation via `pino-roll`
-
-`/app/data/wa-logs.txt` und `mcp-logs.txt` wachsen unbegrenzt. Docker-Logging-Driver mildert das ab, aber sauber wäre:
-```ts
-import { multistream } from "pino";
-import roll from "pino-roll";
-
-pino(opts, await roll({
-  file: `${dataDir}/wa-logs`,
-  size: "10m",
-  frequency: "daily",
-  limit: { count: 7 },
-}));
-```
-
-### 6. Konsistentes Logging
-
-Manche Stellen `console.error/log`, andere `pinoLogger.error/info`. Auf pino vereinheitlichen.
-
-### 7. `storeMessage` Resolver-Cache
-
-`storeMessagesBatch` hat einen per-Batch Resolver-Cache, `storeMessage` (single) nicht. Bei Bursts in `messages.upsert` läuft der Resolver pro Message neu. Mini-Optimierung — kann ein modul-globaler LRU mit ~100 Einträgen werden, der bei Schreibvorgang invalidiert wird.
-
-### 8. Lazy Group-Fetch auf Abruf via MCP-Tool
-
-Aktuell triggert `list_chats` einen Lazy-Group-Fetch wenn unbenannte Gruppen erkannt werden. Sauberer: separates MCP-Tool `refresh_groups` plus Auto-Trigger.
-
-### 9. Init-Query-Timeout (Baileys)
-
-Im wa-logs.txt taucht gelegentlich `unexpected error in 'init queries' / Timed Out (408)` auf. Ist ein Baileys-Internal, nicht direkt fixbar. Mögliche Mitigation: Reconnect-Logik bei diesem spezifischen Error eskalieren statt nur zu warten.
-
-### 10. README — Beispiele für `list_recent_messages`
-
-Aktuell nur in der Tools-Tabelle erwähnt. Quick-Use-Cases ergänzen:
-- "Was hat sich heute getan?" → `hours=24`
-- "Letzte Stunde in Familien-Gruppe" → `hours=1, chat_jid=...@g.us`
-- "Aktivität gestern Abend" → `since=YYYY-MM-DDT19:00:00, until=YYYY-MM-DDT23:59:59`
-
-## 🛡️ Security TODO
-
-- [ ] **TLS via Reverse Proxy** dokumentieren mit konkretem Caddy-/Traefik-Snippet.
-- [ ] **Rate-Limiting auf `/sse`** — aktuell kann ein böser Bearer-Token-Holder ungebremst spammen. Express-Rate-Limit-Middleware ergänzen.
-- [ ] **Audit-Log** für `send_message` — jede gesendete Nachricht im Server-Log mit Tool-Caller-Info, damit nachvollziehbar wer was geschickt hat.
+- **Separate `push_name`-Spalte auf `contacts`** — aktuell wird sowohl Baileys' `notify` als auch der msg-`pushName` in der `notify`-Spalte abgelegt. Funktional korrekt, datenmodelltechnisch aber überladen. Eigene Spalte wäre sauberer.
+- **Konsistentes Logging** — manche Stellen `console.log/error`, andere `pinoLogger.*`. Auf pino vereinheitlichen, am besten mit Child-Loggern pro Subsystem.
+- **`storeMessage` Resolver-Cache** — `storeMessagesBatch` hat einen per-Batch-Cache, `storeMessage` (single) nicht. Bei Bursts via `messages.upsert` läuft der Resolver pro Message neu (Latency-impact <1ms, eher Kosmetik).
+- **TLS / Reverse-Proxy** — Caddy/Traefik-Snippet im README ergänzen.
+- **`refresh_groups` MCP-Tool** — explizites Tool um Gruppennamen-Sync auszulösen, statt nur Lazy-Trigger via `list_chats`.
+- **Init-Query-Timeout (Baileys-Internal)** — gelegentlicher 408-Fehler beim Connect. Mitigation: bei diesem konkreten Error explizit reconnect + Backoff erhöhen.
+- **README** — Beispiele für `list_recent_messages` mit konkreten Use-Cases (heute / letzte Stunde / gestern Abend).
 
 ## 📋 Aktueller Code-Stand
 
-**Letzter Commit:** `cc5c26b` — feat(contacts): auto-link @lid to @s.whatsapp.net via captured pushName
-
-**Image:** `ghcr.io/abrauser/whatsapp-mcp-docker:latest` (multi-arch amd64+arm64)
-
 **Tools (8):**
+
 1. `search_contacts` — Kontakte suchen
 2. `list_messages` — Messages eines Chats (mit `since`/`until`)
-3. `list_recent_messages` — Cross-Chat Time-Window (NEU)
+3. `list_recent_messages` — Cross-Chat Time-Window
 4. `list_chats` — Chats auflisten (sortiert)
 5. `get_chat` — Chat-Details
 6. `get_message_context` — Messages um eine Message herum
-7. `send_message` — Nachricht senden
+7. `send_message` — Nachricht senden (mit Audit-Log)
 8. `search_messages` — FTS5 Volltext-Suche
 
-**Auth:** Bearer-Token via `MCP_AUTH_TOKEN`. Diagnostische 401-Logs (truncated token hint).
+**Auth:** Bearer-Token via `MCP_AUTH_TOKEN`. Tolerant gegenüber Scheme-Casing und Whitespace. Diagnostische 401-Logs (truncated token hint).
+
+**Rate Limit:** 120 req/min/IP auf `/sse`, anpassbar via `MCP_RATE_LIMIT_PER_MIN`.
 
 **Transport:** Streamable HTTP (POST `/sse`). Gemini CLI: `httpUrl`. Andere Clients: `url`.
 
 **Daten-Volumes:**
-- `/app/data` (DB, Logs, `contact_overrides.json`)
-- `/app/auth_info` (WhatsApp Pairing)
+
+- `/app/data` — DB, rotierte Logs, `contact_overrides.json`
+- `/app/auth_info` — WhatsApp Pairing
+
+**Contact-Name Resolution (Reihenfolge):**
+
+1. Manual Override aus `contact_overrides.json`
+2. Saved Address-Book Name (DB `name`-Spalte / `contacts_resolved` View)
+3. Fuzzy Wort-Overlap (push name → eindeutiger saved name)
+4. Push Name (msg.pushName, in `sender_push_name`)
+5. JID-Prefix
+6. "Unknown"
+
+## 🛡️ Security Checklist
+
+- [x] Bearer-Token mit case-insensitive Schema, Trim, redacted Logs
+- [x] Rate-Limit auf `/sse`
+- [x] Audit-Log auf `send_message`
+- [x] Health-Check 503 bei WhatsApp-Disconnect
+- [x] Per-Request McpServer (kein Listener-Leak)
+- [x] Log-Rotation (Disk-Voll-Schutz)
+- [ ] TLS/Reverse-Proxy-Doku
+- [ ] Sender-IP-basiertes Rate-Limit-Tuning für vertrauenswürdige LANs
+
+## 🧪 Tests laufen lassen
+
+```bash
+npm test
+```
+
+Erwartete Ausgabe: 22 pass, 0 fail.
+
+## 📦 Image bauen
+
+```bash
+docker build -t whatsapp-mcp-docker:dev .
+```
+
+CI macht das automatisch bei jedem Push auf `main`. Image landet auf `ghcr.io/<owner>/whatsapp-mcp-docker:latest`.

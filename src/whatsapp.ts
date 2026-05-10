@@ -98,10 +98,18 @@ function parseMessageForDb(msg: WAMessage): DbMessage | null {
     senderJid = null;
   }
 
+  // Always capture pushName as a sender-display fallback. Critical for
+  // messages where Baileys omits key.participant (stickers, some media).
+  const pushName =
+    !msg.key.fromMe && typeof msg.pushName === "string" && msg.pushName.length > 0
+      ? msg.pushName
+      : null;
+
   return {
     id: msg.key.id!,
     chat_jid: msg.key.remoteJid,
     sender: senderJid ? jidNormalizedUser(senderJid) : null,
+    sender_push_name: pushName,
     content: content,
     timestamp: timestamp,
     is_from_me: msg.key.fromMe ?? false,

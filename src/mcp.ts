@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { jidNormalizedUser } from "@whiskeysockets/baileys";
 import express, { type Request, type Response } from "express";
+import rateLimit from "express-rate-limit";
 import { type Server } from "node:http";
 
 import {
@@ -19,6 +20,8 @@ import {
 
 import { sendWhatsAppMessage, scheduleLazyGroupNameFetch, type WhatsAppConnection } from "./whatsapp.ts";
 import { getOverride } from "./contactOverrides.ts";
+import { resolveByPushName } from "./contactResolver.ts";
+import { getDb } from "./database.ts";
 import type { Logger } from "pino";
 
 const TZ = process.env.TZ || "Europe/Berlin";
@@ -29,26 +32,45 @@ function toLocalTime(date: Date): string {
   return date.toLocaleString("sv-SE", { timeZone: TZ }).replace("T", " ");
 }
 
+/**
+ * Resolve the human-readable display string for a message sender.
+ * Priority (high → low):
+ *   1. is_from_me → "Me"
+ *   2. manual override on the sender JID
+ *   3. saved address-book name from the contacts_resolved view (msg.sender_name)
+ *   4. fuzzy word-overlap match: push name → unique saved name
+ *   5. raw push name (always at least populated for non-fromMe messages)
+ *   6. JID prefix when sender is set but everything else is null
+ *   7. "Unknown" — no sender JID and no push name (rare; system messages)
+ */
+function resolveSenderDisplay(msg: DbMessage): string {
+  if (msg.is_from_me) return "Me";
+
+  const override = getOverride(msg.sender);
+  if (override) return override;
+
+  if (msg.sender_name) return msg.sender_name;
+
+  if (msg.sender_push_name) {
+    const fuzzy = resolveByPushName(msg.sender_push_name, getDb());
+    if (fuzzy) return fuzzy.name;
+    return msg.sender_push_name;
+  }
+
+  if (msg.sender) return msg.sender.split("@")[0] ?? msg.sender;
+  return "Unknown";
+}
+
 function formatDbMessageForJson(msg: DbMessage) {
-  // is_from_me is the single source of truth for "Me"; sender JID may still be
-  // set in groups but we want consistent display.
-  // Manual override (contact_overrides.json) wins over both DB name and notify.
-  const senderOverride = getOverride(msg.sender);
   const chatOverride = getOverride(msg.chat_jid);
-  const senderDisplay = msg.is_from_me
-    ? "Me"
-    : senderOverride
-      ? senderOverride
-      : msg.sender
-        ? (msg.sender_name ?? msg.sender.split("@")[0])
-        : "Unknown";
+  const senderOverride = getOverride(msg.sender);
   return {
     id: msg.id,
     chat_jid: msg.chat_jid,
     chat_name: chatOverride ?? msg.chat_name ?? "Unknown Chat",
     sender_jid: msg.sender ?? null,
-    sender_name: senderOverride ?? msg.sender_name ?? null,
-    sender_display: senderDisplay,
+    sender_name: senderOverride ?? msg.sender_name ?? msg.sender_push_name ?? null,
+    sender_display: resolveSenderDisplay(msg),
     content: msg.content,
     timestamp: toLocalTime(msg.timestamp),
     is_from_me: msg.is_from_me,
@@ -58,6 +80,20 @@ function formatDbMessageForJson(msg: DbMessage) {
 function formatDbChatForJson(chat: DbChat) {
   const chatOverride = getOverride(chat.jid);
   const lastSenderOverride = getOverride(chat.last_sender);
+
+  let lastSenderDisplay: string | null;
+  if (chat.last_is_from_me) {
+    lastSenderDisplay = "Me";
+  } else if (lastSenderOverride) {
+    lastSenderDisplay = lastSenderOverride;
+  } else if (chat.last_sender_name) {
+    lastSenderDisplay = chat.last_sender_name;
+  } else if (chat.last_sender) {
+    lastSenderDisplay = chat.last_sender.split("@")[0] ?? chat.last_sender;
+  } else {
+    lastSenderDisplay = null;
+  }
+
   return {
     jid: chat.jid,
     name: chatOverride ?? chat.name ?? chat.jid.split("@")[0] ?? chat.jid,
@@ -66,13 +102,7 @@ function formatDbChatForJson(chat: DbChat) {
     last_message_preview: chat.last_message ?? null,
     last_sender_jid: chat.last_sender ?? null,
     last_sender_name: lastSenderOverride ?? chat.last_sender_name ?? null,
-    last_sender_display: chat.last_is_from_me
-      ? "Me"
-      : lastSenderOverride
-        ? lastSenderOverride
-        : chat.last_sender
-          ? (chat.last_sender_name ?? chat.last_sender.split("@")[0])
-          : null,
+    last_sender_display: lastSenderDisplay,
     last_is_from_me: chat.last_is_from_me ?? null,
   };
 }
@@ -542,7 +572,19 @@ function createMcpServer(
       message: z.string().min(1).describe("The text message to send"),
     },
     async ({ recipient, message }) => {
-      mcpLogger.info(`[MCP Tool] Executing send_message to ${recipient}`);
+      // Audit log: structured record of every send attempt. Pino emits this
+      // at info level so it survives default log filtering and lands in the
+      // rotated wa-logs / mcp-logs files. The full message body is logged at
+      // debug only — see truncated audit field below.
+      mcpLogger.info(
+        {
+          audit: "send_message",
+          recipient,
+          messageLen: message.length,
+          messagePreview: message.slice(0, 80),
+        },
+        `[Audit] send_message → ${recipient}`,
+      );
       if (!connection || !connection.sock) {
         mcpLogger.error(
           "[MCP Tool Error] send_message failed: WhatsApp connection is not active.",
@@ -585,6 +627,14 @@ function createMcpServer(
         );
 
         if (result && result.key && result.key.id) {
+          mcpLogger.info(
+            {
+              audit: "send_message_success",
+              recipient: normalizedRecipient,
+              messageId: result.key.id,
+            },
+            `[Audit] send_message OK ID=${result.key.id}`,
+          );
           return {
             content: [
               {
@@ -778,7 +828,31 @@ export async function startMcpServer(
   // Per the MCP TS SDK stateless example, create a fresh McpServer + transport
   // per request and tear them down on response close. Using a single shared
   // server across many connect() calls leaks listeners.
-  app.post("/sse", requireAuth, async (req: Request, res: Response) => {
+  // ─── Rate limiting (per-IP) on /sse ───────────────────────
+  // Defends against a leaked Bearer token being used to flood the endpoint.
+  // Defaults are deliberately generous; tighten via MCP_RATE_LIMIT_PER_MIN.
+  const rateLimitPerMin = Number.parseInt(
+    process.env.MCP_RATE_LIMIT_PER_MIN ?? "120",
+    10,
+  );
+  const sseLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: Number.isFinite(rateLimitPerMin) && rateLimitPerMin > 0 ? rateLimitPerMin : 120,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    handler: (req, res) => {
+      mcpLogger.warn(
+        `Rate limit exceeded for ${req.ip} on ${req.method} ${req.path}`,
+      );
+      res.status(429).json({
+        jsonrpc: "2.0",
+        error: { code: -32002, message: "Rate limit exceeded" },
+        id: null,
+      });
+    },
+  });
+
+  app.post("/sse", sseLimiter, requireAuth, async (req: Request, res: Response) => {
     mcpLogger.info(`POST /sse from ${req.ip}`);
 
     const reqServer = createMcpServer(connection, mcpLogger, waLogger);

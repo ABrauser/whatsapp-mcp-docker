@@ -1,6 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import fs from "node:fs";
+import { runMigrations, APP_MIGRATIONS } from "./migrations.ts";
+import { invalidateContactResolverCache } from "./contactResolver.ts";
 
 const DATA_DIR = process.env.WHATSAPP_MCP_DATA_DIR
   ? path.resolve(process.env.WHATSAPP_MCP_DATA_DIR)
@@ -22,6 +24,13 @@ export type Message = {
   chat_jid: string;
   sender?: string | null;
   sender_name?: string | null;
+  /**
+   * The contact's WhatsApp push-name as captured from the message itself
+   * (msg.pushName). Acts as a sender-display fallback when `sender` is NULL
+   * — e.g. for stickers and some media where Baileys does not include
+   * key.participant. Survives even if the contact row never gets created.
+   */
+  sender_push_name?: string | null;
   content: string;
   timestamp: Date;
   is_from_me: boolean;
@@ -165,66 +174,54 @@ export function initializeDatabase(): DatabaseSync {
     console.error("FTS5 setup failed (search will fall back to LIKE):", err);
   }
 
-  // --- Migration: Backfill phone_number on @s.whatsapp.net contacts ---
-  // Older rows were created without phone_number even though the JID encodes
-  // it. Fill it in so the @lid → @s.whatsapp.net resolver has a chance.
+  // ── Versioned data migrations ────────────────────────────────────
+  // Schema-level objects above are CREATE … IF NOT EXISTS so they are run
+  // every start. One-shot data transforms and ALTER TABLE statements live in
+  // the migrations module and run exactly once each.
+  runMigrations(db, APP_MIGRATIONS);
+
+  // ── Resolution view (DRY) ────────────────────────────────────────
+  // Single source of truth for contact name resolution. Three levels of
+  // fallback for @lid contacts that lack a name: same-notify match, then
+  // notify-equals-name match, then plain notify/phone/jid. The view is
+  // referenced from getChats, getChat, getMessages, getRecentMessages,
+  // getMessagesAround, searchMessages, searchDbForContacts so that any
+  // change to resolution lives in one place only.
+  // CREATE VIEW IF NOT EXISTS is idempotent. We DROP first so updates to the
+  // logic apply cleanly across upgrades.
   try {
-    const result = db
-      .prepare(`
-        UPDATE contacts
-        SET phone_number = SUBSTR(jid, 1, INSTR(jid, '@') - 1)
-        WHERE jid LIKE '%@s.whatsapp.net'
-          AND (phone_number IS NULL OR phone_number = '')
-          AND SUBSTR(jid, 1, INSTR(jid, '@') - 1) GLOB '[0-9]*'
-      `)
-      .run();
-    if (result.changes > 0) {
-      console.log(`[Migrate] Backfilled phone_number on ${result.changes} contacts.`);
-    }
+    db.exec(`DROP VIEW IF EXISTS contacts_resolved`);
+    db.exec(`
+      CREATE VIEW contacts_resolved AS
+      SELECT
+        ct.jid AS jid,
+        ct.name AS name,
+        ct.notify AS notify,
+        ct.phone_number AS phone_number,
+        COALESCE(
+          ct.name,
+          CASE WHEN ct.jid LIKE '%@lid' AND ct.notify IS NOT NULL THEN
+            (SELECT ct2.name FROM contacts ct2
+             WHERE ct2.jid LIKE '%@s.whatsapp.net'
+               AND ct2.notify = ct.notify
+               AND ct2.name IS NOT NULL
+             LIMIT 1)
+          END,
+          CASE WHEN ct.jid LIKE '%@lid' AND ct.notify IS NOT NULL THEN
+            (SELECT ct2.name FROM contacts ct2
+             WHERE ct2.jid LIKE '%@s.whatsapp.net'
+               AND LOWER(ct2.name) = LOWER(ct.notify)
+               AND ct2.name IS NOT NULL
+             LIMIT 1)
+          END,
+          ct.notify,
+          ct.phone_number,
+          ct.jid
+        ) AS display_name
+      FROM contacts ct;
+    `);
   } catch (err) {
-    console.error("phone_number backfill failed:", err);
-  }
-
-  // --- Migration: Merge existing @lid messages into @s.whatsapp.net ---
-  try {
-    db.exec(`
-      UPDATE OR IGNORE messages 
-      SET chat_jid = (SELECT phone_number || '@s.whatsapp.net' FROM contacts WHERE contacts.jid = messages.chat_jid AND phone_number IS NOT NULL)
-      WHERE chat_jid LIKE '%@lid' AND EXISTS (SELECT 1 FROM contacts WHERE contacts.jid = messages.chat_jid AND phone_number IS NOT NULL);
-    `);
-    
-    // Update sender JIDs as well
-    db.exec(`
-      UPDATE OR IGNORE messages 
-      SET sender = (SELECT phone_number || '@s.whatsapp.net' FROM contacts WHERE contacts.jid = messages.sender AND phone_number IS NOT NULL)
-      WHERE sender LIKE '%@lid' AND EXISTS (SELECT 1 FROM contacts WHERE contacts.jid = messages.sender AND phone_number IS NOT NULL);
-    `);
-
-    // Clean up empty @lid chats that have no messages left
-    db.exec(`
-      DELETE FROM chats 
-      WHERE jid LIKE '%@lid' AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.chat_jid = chats.jid);
-    `);
-
-    // --- Advanced Migration: Phone-only Match Migration for existing @lid chats ---
-    // Startup-side migration only follows the safe phone-number resolution.
-    // Fuzzy name matching is applied lazily for *display* only.
-    const lidChats = db.prepare(`SELECT jid FROM chats WHERE jid LIKE '%@lid'`).all() as { jid: string }[];
-    let migrated = 0;
-    for (const chat of lidChats) {
-      const resolved = resolveJidPhoneOnly(chat.jid);
-      if (resolved && resolved !== chat.jid) {
-        db.prepare(`INSERT OR IGNORE INTO chats (jid, name, last_message_time) SELECT ?, name, last_message_time FROM chats WHERE jid = ?`).run(resolved, chat.jid);
-        db.prepare(`UPDATE OR IGNORE messages SET chat_jid = ? WHERE chat_jid = ?`).run(resolved, chat.jid);
-        db.prepare(`UPDATE OR IGNORE messages SET sender = ? WHERE sender = ?`).run(resolved, chat.jid);
-        db.prepare(`DELETE FROM messages WHERE chat_jid = ? AND id IN (SELECT id FROM messages WHERE chat_jid = ?)`).run(chat.jid, resolved);
-        db.prepare(`DELETE FROM chats WHERE jid = ?`).run(chat.jid);
-        migrated++;
-      }
-    }
-    if (migrated > 0) console.log(`[LID] Startup migration merged ${migrated} chats.`);
-  } catch (err) {
-    console.error("Migration error for @lid merge:", err);
+    console.error("Failed to create contacts_resolved view:", err);
   }
 
   return db;
@@ -412,19 +409,20 @@ export function storeMessage(message: Message): void {
   const db = getDb();
   const resolvedChatJid = resolveJidPhoneOnly(message.chat_jid)!;
   const resolvedSender = resolveJidPhoneOnly(message.sender);
-  
+
   try {
     // Only insert the chat if it doesn't exist, we don't need to update last_message_time twice
     db.prepare(`INSERT OR IGNORE INTO chats (jid, last_message_time) VALUES (?, ?)`).run(resolvedChatJid, message.timestamp.toISOString());
 
     const stmt = db.prepare(`
-            INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
-            VALUES (@id, @chat_jid, @sender, @content, @timestamp, @is_from_me)
+            INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, sender_push_name)
+            VALUES (@id, @chat_jid, @sender, @content, @timestamp, @is_from_me, @sender_push_name)
             ON CONFLICT(id, chat_jid) DO UPDATE SET
                 sender = excluded.sender,
                 content = excluded.content,
                 timestamp = excluded.timestamp,
-                is_from_me = excluded.is_from_me
+                is_from_me = excluded.is_from_me,
+                sender_push_name = COALESCE(excluded.sender_push_name, sender_push_name)
         `);
 
     stmt.run({
@@ -434,6 +432,7 @@ export function storeMessage(message: Message): void {
       content: message.content,
       timestamp: message.timestamp.toISOString(),
       is_from_me: message.is_from_me ? 1 : 0,
+      sender_push_name: message.sender_push_name ?? null,
     });
 
     const updateChatTimeStmt = db.prepare(`
@@ -466,13 +465,14 @@ export function storeMessagesBatch(messages: Message[]): void {
     db.exec("BEGIN TRANSACTION");
     const insertChatStmt = db.prepare(`INSERT OR IGNORE INTO chats (jid, last_message_time) VALUES (?, ?)`);
     const insertMsgStmt = db.prepare(`
-            INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
-            VALUES (@id, @chat_jid, @sender, @content, @timestamp, @is_from_me)
+            INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, sender_push_name)
+            VALUES (@id, @chat_jid, @sender, @content, @timestamp, @is_from_me, @sender_push_name)
             ON CONFLICT(id, chat_jid) DO UPDATE SET
                 sender = excluded.sender,
                 content = excluded.content,
                 timestamp = excluded.timestamp,
-                is_from_me = excluded.is_from_me
+                is_from_me = excluded.is_from_me,
+                sender_push_name = COALESCE(excluded.sender_push_name, sender_push_name)
         `);
     const updateChatTimeStmt = db.prepare(`
             UPDATE chats
@@ -493,6 +493,7 @@ export function storeMessagesBatch(messages: Message[]): void {
         content: msg.content,
         timestamp: isoTime,
         is_from_me: msg.is_from_me ? 1 : 0,
+        sender_push_name: msg.sender_push_name ?? null,
       });
       updateChatTimeStmt.run({
         timestamp: isoTime,
@@ -522,6 +523,7 @@ function rowToMessage(row: any): Message {
     chat_jid: row.chat_jid,
     sender: row.sender,
     sender_name: row.sender_name ?? null,
+    sender_push_name: row.sender_push_name ?? null,
     content: row.content,
     timestamp: parseDateSafe(row.timestamp)!,
     is_from_me: Boolean(row.is_from_me),
@@ -554,11 +556,12 @@ export function getMessages(
     const offset = page * limit;
     let sql = `
             SELECT m.*,
-              c.name as chat_name,
-              COALESCE(ct.name, ct.notify, ct.phone_number) as sender_name
+              COALESCE(c.name, cr_chat.display_name) AS chat_name,
+              cr_sender.display_name AS sender_name
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            LEFT JOIN contacts ct ON m.sender = ct.jid
+            LEFT JOIN contacts_resolved cr_chat ON c.jid = cr_chat.jid
+            LEFT JOIN contacts_resolved cr_sender ON m.sender = cr_sender.jid
             WHERE m.chat_jid = ?
         `;
     const params: (string | number)[] = [chatJid];
@@ -598,12 +601,12 @@ export function getRecentMessages(
     const offset = page * limit;
     let sql = `
             SELECT m.*,
-              COALESCE(c.name, ct_chat.name, ct_chat.notify, ct_chat.phone_number) as chat_name,
-              COALESCE(ct_sender.name, ct_sender.notify, ct_sender.phone_number) as sender_name
+              COALESCE(c.name, cr_chat.display_name) AS chat_name,
+              cr_sender.display_name AS sender_name
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            LEFT JOIN contacts ct_chat ON c.jid = ct_chat.jid
-            LEFT JOIN contacts ct_sender ON m.sender = ct_sender.jid
+            LEFT JOIN contacts_resolved cr_chat ON c.jid = cr_chat.jid
+            LEFT JOIN contacts_resolved cr_sender ON m.sender = cr_sender.jid
             WHERE m.timestamp >= ?
         `;
     const params: (string | number)[] = [sinceIso];
@@ -639,54 +642,33 @@ export function getChats(
     let sql = `
             SELECT
                 c.jid,
-                COALESCE(
-                  c.name,
-                  ct.name,
-                  CASE WHEN c.jid LIKE '%@lid' AND ct.notify IS NOT NULL THEN
-                    COALESCE(
-                      -- Try: same notify value on a @s.whatsapp.net contact
-                      (SELECT ct2.name FROM contacts ct2
-                       WHERE ct2.jid LIKE '%@s.whatsapp.net'
-                       AND ct2.notify = ct.notify
-                       AND ct2.name IS NOT NULL
-                       LIMIT 1),
-                      -- Try: @lid notify matches name of a saved @s.whatsapp.net contact
-                      (SELECT ct2.name FROM contacts ct2
-                       WHERE ct2.jid LIKE '%@s.whatsapp.net'
-                       AND LOWER(ct2.name) = LOWER(ct.notify)
-                       AND ct2.name IS NOT NULL
-                       LIMIT 1)
-                    )
-                  END,
-                  ct.notify,
-                  ct.phone_number
-                ) as name,
+                COALESCE(c.name, cr.display_name) AS name,
                 c.last_message_time
                 ${
                   includeLastMessage
                     ? `,
                 (SELECT m.content FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_message,
                 (SELECT m.sender FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender,
-                (SELECT COALESCE(ct2.name, ct2.notify, ct2.phone_number) FROM messages m LEFT JOIN contacts ct2 ON m.sender = ct2.jid WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender_name,
+                (SELECT cr_s.display_name FROM messages m LEFT JOIN contacts_resolved cr_s ON m.sender = cr_s.jid WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender_name,
                 (SELECT m.is_from_me FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_is_from_me
                 `
                     : ""
                 }
             FROM chats c
-            LEFT JOIN contacts ct ON c.jid = ct.jid
+            LEFT JOIN contacts_resolved cr ON c.jid = cr.jid
         `;
 
     const params: (string | number)[] = [];
 
     if (query) {
-      sql += ` WHERE (LOWER(COALESCE(c.name, ct.name, ct.notify, ct.phone_number)) LIKE LOWER(?) OR c.jid LIKE ?)`;
+      sql += ` WHERE (LOWER(COALESCE(c.name, cr.display_name)) LIKE LOWER(?) OR c.jid LIKE ?)`;
       params.push(`%${query}%`, `%${query}%`);
     }
 
     const orderByClause =
       sortBy === "last_active"
         ? "c.last_message_time DESC NULLS LAST"
-        : "COALESCE(c.name, ct.name, ct.notify, ct.phone_number) ASC";
+        : "COALESCE(c.name, cr.display_name) ASC";
     sql += ` ORDER BY ${orderByClause}, c.jid ASC`;
 
     sql += ` LIMIT ? OFFSET ?`;
@@ -710,39 +692,20 @@ export function getChat(
     let sql = `
             SELECT
                 c.jid,
-                COALESCE(
-                  c.name,
-                  ct.name,
-                  CASE WHEN c.jid LIKE '%@lid' AND ct.notify IS NOT NULL THEN
-                    COALESCE(
-                      (SELECT ct2.name FROM contacts ct2
-                       WHERE ct2.jid LIKE '%@s.whatsapp.net'
-                       AND ct2.notify = ct.notify
-                       AND ct2.name IS NOT NULL
-                       LIMIT 1),
-                      (SELECT ct2.name FROM contacts ct2
-                       WHERE ct2.jid LIKE '%@s.whatsapp.net'
-                       AND LOWER(ct2.name) = LOWER(ct.notify)
-                       AND ct2.name IS NOT NULL
-                       LIMIT 1)
-                    )
-                  END,
-                  ct.notify,
-                  ct.phone_number
-                ) as name,
+                COALESCE(c.name, cr.display_name) AS name,
                 c.last_message_time
                 ${
                   includeLastMessage
                     ? `,
                 (SELECT m.content FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_message,
                 (SELECT m.sender FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender,
-                (SELECT COALESCE(ct2.name, ct2.notify, ct2.phone_number) FROM messages m LEFT JOIN contacts ct2 ON m.sender = ct2.jid WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender_name,
+                (SELECT cr_s.display_name FROM messages m LEFT JOIN contacts_resolved cr_s ON m.sender = cr_s.jid WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender_name,
                 (SELECT m.is_from_me FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_is_from_me
                 `
                     : ""
                 }
             FROM chats c
-            LEFT JOIN contacts ct ON c.jid = ct.jid
+            LEFT JOIN contacts_resolved cr ON c.jid = cr.jid
             WHERE c.jid = ?
         `;
 
@@ -769,11 +732,12 @@ export function getMessagesAround(
 
   const MSG_WITH_SENDER = `
     SELECT m.*,
-      c.name as chat_name,
-      COALESCE(ct.name, ct.notify, ct.phone_number) as sender_name
+      COALESCE(c.name, cr_chat.display_name) AS chat_name,
+      cr_sender.display_name AS sender_name
     FROM messages m
     JOIN chats c ON m.chat_jid = c.jid
-    LEFT JOIN contacts ct ON m.sender = ct.jid
+    LEFT JOIN contacts_resolved cr_chat ON c.jid = cr_chat.jid
+    LEFT JOIN contacts_resolved cr_sender ON m.sender = cr_sender.jid
   `;
 
   try {
@@ -819,24 +783,10 @@ export function searchDbForContacts(
     const pattern = `%${query}%`;
 
     const stmt = db.prepare(`
-      SELECT
-        jid,
-        COALESCE(
-          name,
-          CASE WHEN jid LIKE '%@lid' AND notify IS NOT NULL THEN
-            (SELECT ct2.name FROM contacts ct2
-             WHERE ct2.jid LIKE '%@s.whatsapp.net'
-             AND ct2.notify = contacts.notify
-             AND ct2.name IS NOT NULL
-             LIMIT 1)
-          END,
-          notify,
-          phone_number,
-          jid
-        ) AS display_name
-      FROM contacts
+      SELECT cr.jid AS jid, cr.display_name AS display_name
+      FROM contacts_resolved cr
       WHERE
-        LOWER(COALESCE(name, notify, phone_number, jid)) LIKE LOWER(?)
+        LOWER(COALESCE(cr.display_name, cr.jid)) LIKE LOWER(?)
       LIMIT ?
     `);
 
@@ -887,25 +837,25 @@ export function searchMessages(
     if (useFts) {
       sql = `
             SELECT m.*,
-              COALESCE(c.name, ct_chat.name, ct_chat.notify, ct_chat.phone_number) as chat_name,
-              COALESCE(ct_sender.name, ct_sender.notify, ct_sender.phone_number) as sender_name
+              COALESCE(c.name, cr_chat.display_name) AS chat_name,
+              cr_sender.display_name AS sender_name
             FROM messages_fts f
             JOIN messages m ON m.rowid = f.rowid
             JOIN chats c ON m.chat_jid = c.jid
-            LEFT JOIN contacts ct_chat ON c.jid = ct_chat.jid
-            LEFT JOIN contacts ct_sender ON m.sender = ct_sender.jid
+            LEFT JOIN contacts_resolved cr_chat ON c.jid = cr_chat.jid
+            LEFT JOIN contacts_resolved cr_sender ON m.sender = cr_sender.jid
             WHERE messages_fts MATCH ?
         `;
       params.push(escapeFtsQuery(searchQuery));
     } else {
       sql = `
             SELECT m.*,
-              COALESCE(c.name, ct_chat.name, ct_chat.notify, ct_chat.phone_number) as chat_name,
-              COALESCE(ct_sender.name, ct_sender.notify, ct_sender.phone_number) as sender_name
+              COALESCE(c.name, cr_chat.display_name) AS chat_name,
+              cr_sender.display_name AS sender_name
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            LEFT JOIN contacts ct_chat ON c.jid = ct_chat.jid
-            LEFT JOIN contacts ct_sender ON m.sender = ct_sender.jid
+            LEFT JOIN contacts_resolved cr_chat ON c.jid = cr_chat.jid
+            LEFT JOIN contacts_resolved cr_sender ON m.sender = cr_sender.jid
             WHERE LOWER(m.content) LIKE LOWER(?)
         `;
       params.push(`%${searchQuery}%`);
@@ -976,6 +926,12 @@ export function storeContact(contact: {
       notify: contact.notify ?? null,
       phone_number: phone,
     });
+
+    // The fuzzy resolver caches `name`-bearing @s.whatsapp.net contacts. Any
+    // write may have added or changed one, so drop the cache.
+    if (contact.name) {
+      invalidateContactResolverCache();
+    }
   } catch (error) {
     console.error("Error storing contact:", error);
   }

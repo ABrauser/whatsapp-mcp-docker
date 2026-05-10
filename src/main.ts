@@ -1,4 +1,5 @@
 import pino from "pino";
+import roll from "pino-roll";
 import fs from "node:fs";
 import { initializeDatabase, closeDatabase } from "./database.ts";
 import { startWhatsAppConnection, stopWhatsAppConnection, type WhatsAppConnection } from "./whatsapp.ts";
@@ -15,21 +16,36 @@ if (!Number.isFinite(port) || port < 1 || port > 65535) {
 const dataDir = process.env.WHATSAPP_MCP_DATA_DIR || ".";
 fs.mkdirSync(dataDir, { recursive: true });
 
-const waLogger = pino(
-  {
+// Rotated log files: 10 MB max per chunk, daily new file, retain 7 days.
+// Falls back to a plain destination if pino-roll fails (e.g. read-only FS).
+async function buildRotatingLogger(
+  baseFile: string,
+): Promise<pino.Logger> {
+  const opts: pino.LoggerOptions = {
     level: process.env.LOG_LEVEL || "info",
     timestamp: pino.stdTimeFunctions.isoTime,
-  },
-  pino.destination(`${dataDir}/wa-logs.txt`)
-);
+  };
+  try {
+    const stream = await roll({
+      file: baseFile,
+      size: "10m",
+      frequency: "daily",
+      dateFormat: "yyyy-MM-dd",
+      limit: { count: 7 },
+      mkdir: true,
+    });
+    return pino(opts, stream);
+  } catch (err) {
+    console.warn(
+      `pino-roll setup failed for ${baseFile}, falling back to plain destination:`,
+      err,
+    );
+    return pino(opts, pino.destination(baseFile));
+  }
+}
 
-const mcpLogger = pino(
-  {
-    level: process.env.LOG_LEVEL || "info",
-    timestamp: pino.stdTimeFunctions.isoTime,
-  },
-  pino.destination(`${dataDir}/mcp-logs.txt`)
-);
+const waLogger = await buildRotatingLogger(`${dataDir}/wa-logs.txt`);
+const mcpLogger = await buildRotatingLogger(`${dataDir}/mcp-logs.txt`);
 
 let whatsappConnection: WhatsAppConnection | null = null;
 let httpServer: Server | null = null;
