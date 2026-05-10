@@ -101,14 +101,15 @@ function resolveSenderDisplay(msg: DbMessage): string {
 
 function formatDbMessageForJson(msg: DbMessage) {
   const chatOverride = getOverride(msg.chat_jid);
-  const senderOverride = getOverride(msg.sender);
   return {
     id: msg.id,
     chat_jid: msg.chat_jid,
     chat_name: chatOverride ?? msg.chat_name ?? "Unknown Chat",
     sender_jid: msg.sender ?? null,
-    sender_name: senderOverride ?? msg.sender_name ?? msg.sender_push_name ?? null,
-    sender_display: resolveSenderDisplay(msg),
+    // Single, fully-resolved name for the LLM. Combines: override > saved
+    // address-book name > fuzzy match on push name > push name > JID prefix.
+    // For own messages this is "Me" (mirroring is_from_me).
+    sender_name: resolveSenderDisplay(msg),
     content: msg.content,
     timestamp: toLocalTime(msg.timestamp),
     is_from_me: msg.is_from_me,
@@ -117,20 +118,21 @@ function formatDbMessageForJson(msg: DbMessage) {
 
 function formatDbChatForJson(chat: DbChat) {
   const chatOverride = getOverride(chat.jid);
-  const lastSenderOverride = getOverride(chat.last_sender);
 
-  let lastSenderDisplay: string | null;
-  if (chat.last_is_from_me) {
-    lastSenderDisplay = "Me";
-  } else if (lastSenderOverride) {
-    lastSenderDisplay = lastSenderOverride;
-  } else if (chat.last_sender_name) {
-    lastSenderDisplay = chat.last_sender_name;
-  } else if (chat.last_sender) {
-    lastSenderDisplay = chat.last_sender.split("@")[0] ?? chat.last_sender;
-  } else {
-    lastSenderDisplay = null;
-  }
+  // Empty chat (no messages yet) → null. Otherwise reuse the same
+  // resolution logic as formatDbMessageForJson so the field is consistent
+  // across list_chats and list_recent_messages.
+  const hasLastSender = chat.last_is_from_me || !!chat.last_sender;
+  const lastSenderName = hasLastSender
+    ? pickSenderDisplay({
+        isFromMe: !!chat.last_is_from_me,
+        override: getOverride(chat.last_sender),
+        savedName: chat.last_sender_name ?? null,
+        pushName: chat.last_sender_push_name ?? null,
+        senderJid: chat.last_sender ?? null,
+        fuzzy: (push) => resolveByPushName(push, getDb()),
+      })
+    : null;
 
   return {
     jid: chat.jid,
@@ -139,8 +141,8 @@ function formatDbChatForJson(chat: DbChat) {
     last_message_time: chat.last_message_time ? toLocalTime(chat.last_message_time) : null,
     last_message_preview: chat.last_message ?? null,
     last_sender_jid: chat.last_sender ?? null,
-    last_sender_name: lastSenderOverride ?? chat.last_sender_name ?? null,
-    last_sender_display: lastSenderDisplay,
+    // Single resolved name; "Me" when the chat's last message was from us.
+    last_sender_name: lastSenderName,
     last_is_from_me: chat.last_is_from_me ?? null,
   };
 }

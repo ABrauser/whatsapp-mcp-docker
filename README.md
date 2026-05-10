@@ -97,7 +97,7 @@ Path: `<data dir>/contact_overrides.json` (typically `/opt/docker/whatsapp-mcp/d
 }
 ```
 
-- The override wins over both `name` and `notify` from the DB in every MCP response (`chat_name`, `sender_name`, `sender_display`, `last_sender_*`).
+- The override wins over the DB-resolved name in every MCP response (`chat_name`, `sender_name`, `last_sender_name`).
 - File is **hot-reloaded** on save — no container restart required.
 - Each entry is a JID → display name mapping. Find a contact's JID via `search_contacts` or `list_chats`.
 - See `contact_overrides.example.json` in the repo for the format.

@@ -16,6 +16,7 @@ export interface Chat {
   last_message?: string | null;
   last_sender?: string | null;
   last_sender_name?: string | null;
+  last_sender_push_name?: string | null;
   last_is_from_me?: boolean | null;
 }
 
@@ -539,6 +540,7 @@ function rowToChat(row: any): Chat {
     last_message: row.last_message,
     last_sender: row.last_sender,
     last_sender_name: row.last_sender_name ?? null,
+    last_sender_push_name: row.last_sender_push_name ?? null,
     last_is_from_me:
       row.last_is_from_me !== null ? Boolean(row.last_is_from_me) : null,
   };
@@ -650,6 +652,7 @@ export function getChats(
                 (SELECT m.content FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_message,
                 (SELECT m.sender FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender,
                 (SELECT cr_s.display_name FROM messages m LEFT JOIN contacts_resolved cr_s ON m.sender = cr_s.jid WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender_name,
+                (SELECT m.sender_push_name FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender_push_name,
                 (SELECT m.is_from_me FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_is_from_me
                 `
                     : ""
@@ -700,6 +703,7 @@ export function getChat(
                 (SELECT m.content FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_message,
                 (SELECT m.sender FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender,
                 (SELECT cr_s.display_name FROM messages m LEFT JOIN contacts_resolved cr_s ON m.sender = cr_s.jid WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender_name,
+                (SELECT m.sender_push_name FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender_push_name,
                 (SELECT m.is_from_me FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_is_from_me
                 `
                     : ""
