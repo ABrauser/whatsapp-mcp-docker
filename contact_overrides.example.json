@@ -1,0 +1,6 @@
+{
+  "_comment": "Map of WhatsApp JID -> display name. Wins over Baileys-supplied names. Hot-reloaded on edit. Place this file at <data>/contact_overrides.json (e.g. /opt/docker/whatsapp-mcp/data/contact_overrides.json).",
+  "210444891463794@lid": "Tammy",
+  "11390320418995@lid": "Amelie",
+  "4917697335710@s.whatsapp.net": "Tammy"
+}

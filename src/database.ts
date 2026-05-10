@@ -165,6 +165,26 @@ export function initializeDatabase(): DatabaseSync {
     console.error("FTS5 setup failed (search will fall back to LIKE):", err);
   }
 
+  // --- Migration: Backfill phone_number on @s.whatsapp.net contacts ---
+  // Older rows were created without phone_number even though the JID encodes
+  // it. Fill it in so the @lid → @s.whatsapp.net resolver has a chance.
+  try {
+    const result = db
+      .prepare(`
+        UPDATE contacts
+        SET phone_number = SUBSTR(jid, 1, INSTR(jid, '@') - 1)
+        WHERE jid LIKE '%@s.whatsapp.net'
+          AND (phone_number IS NULL OR phone_number = '')
+          AND SUBSTR(jid, 1, INSTR(jid, '@') - 1) GLOB '[0-9]*'
+      `)
+      .run();
+    if (result.changes > 0) {
+      console.log(`[Migrate] Backfilled phone_number on ${result.changes} contacts.`);
+    }
+  } catch (err) {
+    console.error("phone_number backfill failed:", err);
+  }
+
   // --- Migration: Merge existing @lid messages into @s.whatsapp.net ---
   try {
     db.exec(`
@@ -920,6 +940,12 @@ export function closeDatabase(): void {
   }
 }
 
+/** Extract phone digits from a `digits@s.whatsapp.net` JID, else null. */
+function phoneFromJid(jid: string): string | null {
+  const m = jid.match(/^(\d+)@s\.whatsapp\.net$/);
+  return m ? m[1] : null;
+}
+
 export function storeContact(contact: {
   jid: string;
   name?: string | null;
@@ -928,6 +954,13 @@ export function storeContact(contact: {
 }): void {
   const db = getDb();
   try {
+    // If Baileys didn't supply a phone number but the JID is digits@s.whatsapp.net,
+    // we already have it embedded in the JID. Backfill so the @lid resolver works.
+    const phone =
+      contact.phoneNumber && contact.phoneNumber.length > 0
+        ? contact.phoneNumber
+        : phoneFromJid(contact.jid);
+
     const stmt = db.prepare(`
       INSERT INTO contacts (jid, name, notify, phone_number)
       VALUES (@jid, @name, @notify, @phone_number)
@@ -941,7 +974,7 @@ export function storeContact(contact: {
       jid: contact.jid,
       name: contact.name ?? null,
       notify: contact.notify ?? null,
-      phone_number: contact.phoneNumber ?? null,
+      phone_number: phone,
     });
   } catch (error) {
     console.error("Error storing contact:", error);

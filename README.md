@@ -75,6 +75,25 @@ This server speaks **Streamable HTTP** MCP (POST `/sse`), not legacy SSE. The ex
 }
 ```
 
+## Contact Name Overrides
+
+WhatsApp Web (Baileys) does not always sync your phone-side address book. If a contact appears under their *push name* (what they set themselves) instead of the name you saved on your phone, you can override the display name with a JSON file:
+
+Path: `<data dir>/contact_overrides.json` (typically `/opt/docker/whatsapp-mcp/data/contact_overrides.json` on the host)
+
+```json
+{
+  "210444891463794@lid": "Tammy",
+  "11390320418995@lid": "Amelie",
+  "4917697335710@s.whatsapp.net": "Tammy"
+}
+```
+
+- The override wins over both `name` and `notify` from the DB in every MCP response (`chat_name`, `sender_name`, `sender_display`, `last_sender_*`).
+- File is **hot-reloaded** on save — no container restart required.
+- Each entry is a JID → display name mapping. Find a contact's JID via `search_contacts` or `list_chats`.
+- See `contact_overrides.example.json` in the repo for the format.
+
 ## Security
 
 - **Always set `MCP_AUTH_TOKEN`** unless you bind the container to `127.0.0.1` only. Without a token, anyone on your network can read your chats and send messages from your account.

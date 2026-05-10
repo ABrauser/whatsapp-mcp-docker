@@ -18,6 +18,7 @@ import {
 } from "./database.ts";
 
 import { sendWhatsAppMessage, scheduleLazyGroupNameFetch, type WhatsAppConnection } from "./whatsapp.ts";
+import { getOverride } from "./contactOverrides.ts";
 import type { Logger } from "pino";
 
 const TZ = process.env.TZ || "Europe/Berlin";
@@ -31,17 +32,22 @@ function toLocalTime(date: Date): string {
 function formatDbMessageForJson(msg: DbMessage) {
   // is_from_me is the single source of truth for "Me"; sender JID may still be
   // set in groups but we want consistent display.
+  // Manual override (contact_overrides.json) wins over both DB name and notify.
+  const senderOverride = getOverride(msg.sender);
+  const chatOverride = getOverride(msg.chat_jid);
   const senderDisplay = msg.is_from_me
     ? "Me"
-    : msg.sender
-      ? (msg.sender_name ?? msg.sender.split("@")[0])
-      : "Unknown";
+    : senderOverride
+      ? senderOverride
+      : msg.sender
+        ? (msg.sender_name ?? msg.sender.split("@")[0])
+        : "Unknown";
   return {
     id: msg.id,
     chat_jid: msg.chat_jid,
-    chat_name: msg.chat_name ?? "Unknown Chat",
+    chat_name: chatOverride ?? msg.chat_name ?? "Unknown Chat",
     sender_jid: msg.sender ?? null,
-    sender_name: msg.sender_name ?? null,
+    sender_name: senderOverride ?? msg.sender_name ?? null,
     sender_display: senderDisplay,
     content: msg.content,
     timestamp: toLocalTime(msg.timestamp),
@@ -50,19 +56,23 @@ function formatDbMessageForJson(msg: DbMessage) {
 }
 
 function formatDbChatForJson(chat: DbChat) {
+  const chatOverride = getOverride(chat.jid);
+  const lastSenderOverride = getOverride(chat.last_sender);
   return {
     jid: chat.jid,
-    name: chat.name ?? chat.jid.split("@")[0] ?? chat.jid,
+    name: chatOverride ?? chat.name ?? chat.jid.split("@")[0] ?? chat.jid,
     is_group: chat.jid.endsWith("@g.us"),
     last_message_time: chat.last_message_time ? toLocalTime(chat.last_message_time) : null,
     last_message_preview: chat.last_message ?? null,
     last_sender_jid: chat.last_sender ?? null,
-    last_sender_name: chat.last_sender_name ?? null,
-    last_sender_display: chat.last_sender
-      ? (chat.last_sender_name ?? chat.last_sender.split("@")[0])
-      : chat.last_is_from_me
-        ? "Me"
-        : null,
+    last_sender_name: lastSenderOverride ?? chat.last_sender_name ?? null,
+    last_sender_display: chat.last_is_from_me
+      ? "Me"
+      : lastSenderOverride
+        ? lastSenderOverride
+        : chat.last_sender
+          ? (chat.last_sender_name ?? chat.last_sender.split("@")[0])
+          : null,
     last_is_from_me: chat.last_is_from_me ?? null,
   };
 }

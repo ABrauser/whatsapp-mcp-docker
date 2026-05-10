@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { initializeDatabase, closeDatabase } from "./database.ts";
 import { startWhatsAppConnection, stopWhatsAppConnection, type WhatsAppConnection } from "./whatsapp.ts";
 import { startMcpServer } from "./mcp.ts";
+import { initContactOverrides, closeContactOverrides } from "./contactOverrides.ts";
 import { type Server } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -46,6 +47,8 @@ async function main() {
     initializeDatabase();
     mcpLogger.info("Database initialized successfully.");
     console.log("✅ Database initialized");
+
+    initContactOverrides(dataDir);
 
     mcpLogger.info("Attempting to connect to WhatsApp...");
     console.log("⏳ Connecting to WhatsApp...");
@@ -103,6 +106,9 @@ async function shutdown(signal: string) {
     mcpLogger.info("Closing WhatsApp connection...");
     stopWhatsAppConnection(whatsappConnection);
   }
+
+  mcpLogger.info("Closing contact overrides watcher...");
+  closeContactOverrides();
 
   mcpLogger.info("Closing database...");
   closeDatabase();

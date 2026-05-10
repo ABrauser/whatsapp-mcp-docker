@@ -7,6 +7,10 @@ wa-logs.txt
 mcp-logs.txt
 .env
 
+# User contact overrides (private)
+contact_overrides.json
+**/contact_overrides.json
+
 # Local agent tooling (skills, lock files)
 .windsurf/
 skills-lock.json
