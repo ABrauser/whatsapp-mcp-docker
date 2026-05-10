@@ -724,11 +724,13 @@ export async function startMcpServer(
           ? `   Auth:            Bearer token required (set via MCP_AUTH_TOKEN)`
           : `   Auth:            DISABLED — set MCP_AUTH_TOKEN to enable`
       );
-      console.log(`\n   Configure your MCP client with:`);
       const exampleHeaders = AUTH_TOKEN
         ? `, "headers": { "Authorization": "Bearer <YOUR_TOKEN>" }`
         : "";
-      console.log(`   { "url": "http://<YOUR-IP>:${port}/sse"${exampleHeaders} }\n`);
+      console.log(`\n   Configure your MCP client with:`);
+      console.log(`   - Gemini CLI:                 { "httpUrl": "http://<YOUR-IP>:${port}/sse"${exampleHeaders} }`);
+      console.log(`   - Claude / Cline / Cursor:    { "url":     "http://<YOUR-IP>:${port}/sse"${exampleHeaders} }\n`);
+      console.log(`   ⚠️  Gemini CLI: must use "httpUrl" (Streamable HTTP), not "url" (legacy SSE).\n`);
       resolve({ httpServer, mcpServer });
     });
   });
