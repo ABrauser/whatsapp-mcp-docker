@@ -13,6 +13,7 @@ export interface Chat {
   last_message_time?: Date | null;
   last_message?: string | null;
   last_sender?: string | null;
+  last_sender_name?: string | null;
   last_is_from_me?: boolean | null;
 }
 
@@ -20,6 +21,7 @@ export type Message = {
   id: string;
   chat_jid: string;
   sender?: string | null;
+  sender_name?: string | null;
   content: string;
   timestamp: Date;
   is_from_me: boolean;
@@ -50,6 +52,10 @@ export function getUnnamedGroupJids(): string[] {
   }
 }
 
+/**
+ * @deprecated Name resolution is now done via JOIN in queries (no N+1).
+ * Kept for ad-hoc tooling; do not call per-row.
+ */
 export function getContactName(jid: string | null | undefined): string | null {
   if (!jid) return null;
   try {
@@ -61,6 +67,11 @@ export function getContactName(jid: string | null | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+const LOG_VERBOSE = process.env.WHATSAPP_DEBUG === "true" || process.env.LOG_LEVEL === "debug";
+function vlog(...args: unknown[]): void {
+  if (LOG_VERBOSE) console.log(...args);
 }
 
 export function initializeDatabase(): DatabaseSync {
@@ -107,9 +118,52 @@ export function initializeDatabase(): DatabaseSync {
   db.exec(
     `CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages (sender);`,
   );
+  // Composite index for the most common query: messages of a chat ordered by time desc.
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages (chat_jid, timestamp DESC);`,
+  );
   db.exec(
     `CREATE INDEX IF NOT EXISTS idx_chats_last_message_time ON chats (last_message_time);`,
   );
+
+  // ── FTS5 virtual table for fast content search ──────────────────
+  // Using `external content` mode keyed on (id, chat_jid) keeps storage compact
+  // and lets us rebuild from messages if needed.
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        content,
+        content='messages',
+        content_rowid='rowid',
+        tokenize='unicode61 remove_diacritics 2'
+      );
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+      END;
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+      END;
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+        INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+      END;
+    `);
+    // Backfill if FTS index is empty but messages exist (first-time migration).
+    const ftsCount = (db.prepare(`SELECT count(*) as n FROM messages_fts`).get() as { n: number }).n;
+    const msgCount = (db.prepare(`SELECT count(*) as n FROM messages`).get() as { n: number }).n;
+    if (ftsCount === 0 && msgCount > 0) {
+      db.exec(`INSERT INTO messages_fts(rowid, content) SELECT rowid, content FROM messages;`);
+      console.log(`[FTS] Backfilled ${msgCount} messages into messages_fts.`);
+    }
+  } catch (err) {
+    console.error("FTS5 setup failed (search will fall back to LIKE):", err);
+  }
 
   // --- Migration: Merge existing @lid messages into @s.whatsapp.net ---
   try {
@@ -132,26 +186,23 @@ export function initializeDatabase(): DatabaseSync {
       WHERE jid LIKE '%@lid' AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.chat_jid = chats.jid);
     `);
 
-    // --- Advanced Migration: Fuzzy Match Migration for existing @lid chats ---
+    // --- Advanced Migration: Phone-only Match Migration for existing @lid chats ---
+    // Startup-side migration only follows the safe phone-number resolution.
+    // Fuzzy name matching is applied lazily for *display* only.
     const lidChats = db.prepare(`SELECT jid FROM chats WHERE jid LIKE '%@lid'`).all() as { jid: string }[];
+    let migrated = 0;
     for (const chat of lidChats) {
-      const resolved = resolveJidSync(chat.jid);
+      const resolved = resolveJidPhoneOnly(chat.jid);
       if (resolved && resolved !== chat.jid) {
-        // Ensure target chat exists to prevent foreign key failures
         db.prepare(`INSERT OR IGNORE INTO chats (jid, name, last_message_time) SELECT ?, name, last_message_time FROM chats WHERE jid = ?`).run(resolved, chat.jid);
-        
-        // Move messages that can be moved (no duplicate ID in target)
         db.prepare(`UPDATE OR IGNORE messages SET chat_jid = ? WHERE chat_jid = ?`).run(resolved, chat.jid);
         db.prepare(`UPDATE OR IGNORE messages SET sender = ? WHERE sender = ?`).run(resolved, chat.jid);
-        
-        // Delete leftover duplicate messages that couldn't be moved (already exist in target)
         db.prepare(`DELETE FROM messages WHERE chat_jid = ? AND id IN (SELECT id FROM messages WHERE chat_jid = ?)`).run(chat.jid, resolved);
-        
-        // Now the @lid chat should be empty — delete it
         db.prepare(`DELETE FROM chats WHERE jid = ?`).run(chat.jid);
-        console.log(`[LID] STARTUP MIGRATION: Merged ${chat.jid} -> ${resolved}`);
+        migrated++;
       }
     }
+    if (migrated > 0) console.log(`[LID] Startup migration merged ${migrated} chats.`);
   } catch (err) {
     console.error("Migration error for @lid merge:", err);
   }
@@ -161,35 +212,47 @@ export function initializeDatabase(): DatabaseSync {
 
 /**
  * Run at runtime after contacts are updated to migrate any @lid messages
- * that can now be resolved to @s.whatsapp.net JIDs.
+ * that can now be resolved to @s.whatsapp.net JIDs (phone-number based only).
  */
 export function migrateLidMessages(): void {
   const db = getDb();
   try {
     const lidChats = db.prepare(`SELECT jid FROM chats WHERE jid LIKE '%@lid'`).all() as { jid: string }[];
+    let merged = 0;
     for (const chat of lidChats) {
-      const resolved = resolveJidSync(chat.jid);
+      const resolved = resolveJidPhoneOnly(chat.jid);
       if (resolved && resolved !== chat.jid) {
         db.prepare(`INSERT OR IGNORE INTO chats (jid, name, last_message_time) SELECT ?, name, last_message_time FROM chats WHERE jid = ?`).run(resolved, chat.jid);
         db.prepare(`UPDATE OR IGNORE messages SET chat_jid = ? WHERE chat_jid = ?`).run(resolved, chat.jid);
         db.prepare(`UPDATE OR IGNORE messages SET sender = ? WHERE sender = ?`).run(resolved, chat.jid);
         db.prepare(`DELETE FROM messages WHERE chat_jid = ? AND id IN (SELECT id FROM messages WHERE chat_jid = ?)`).run(chat.jid, resolved);
         db.prepare(`DELETE FROM chats WHERE jid = ?`).run(chat.jid);
-        console.log(`[LID] RUNTIME MIGRATION: Merged ${chat.jid} -> ${resolved}`);
+        merged++;
       }
     }
+    if (merged > 0) console.log(`[LID] Runtime migration merged ${merged} chats.`);
   } catch (err) {
     console.error("Error in runtime LID migration:", err);
   }
 }
 
-export function debugLidMapping(logger: any): void {
+// Trailing-debounce wrapper: many contacts.update events in burst -> one scan.
+let lidMigrationTimer: NodeJS.Timeout | null = null;
+export function scheduleLidMigration(delayMs: number = 2000): void {
+  if (lidMigrationTimer) clearTimeout(lidMigrationTimer);
+  lidMigrationTimer = setTimeout(() => {
+    lidMigrationTimer = null;
+    migrateLidMessages();
+  }, delayMs);
+}
+
+export function debugLidMapping(_logger: any): void {
   const db = getDb();
   try {
     const lidContacts = db.prepare(`SELECT jid, name, notify, phone_number FROM contacts WHERE jid LIKE '%@lid'`).all() as any[];
     const chats = db.prepare(`SELECT jid, name, last_message_time FROM chats WHERE jid LIKE '%@lid'`).all() as any[];
-    
-    console.log("\\n=== DEBUG: @lid Mapping Status ===");
+
+    console.log("\n=== DEBUG: @lid Mapping Status ===");
     console.log(`Total @lid contacts in DB: ${lidContacts.length}`);
     console.log(`Total @lid chats in DB: ${chats.length}`);
     
@@ -223,63 +286,85 @@ export function debugLidMapping(logger: any): void {
       }
       console.log("----------------------------------");
     }
-    console.log("====================================\\n");
+    console.log("====================================\n");
   } catch (err) {
     console.error("Error running debugLidMapping:", err);
   }
 }
 
-export function resolveJidSync(jid: string | null | undefined): string | null {
+/**
+ * Phone-number based resolution only. SAFE for write paths (storeMessage,
+ * storeChat, migrations) because exact-match phone numbers cannot misroute.
+ */
+export function resolveJidPhoneOnly(jid: string | null | undefined): string | null {
   if (!jid) return null;
   if (!jid.endsWith("@lid")) return jid;
 
   const db = getDb();
   try {
-    const stmt = db.prepare(`SELECT name, notify, phone_number FROM contacts WHERE jid = ?`);
-    const row = stmt.get(jid) as { name: string | null; notify: string | null; phone_number: string | null } | undefined;
-    
-    if (row) {
-      // 1. Primary resolution via phone number
-      if (row.phone_number) {
-        const cleanPhone = row.phone_number.replace(/[^0-9]/g, "");
-        if (cleanPhone) {
-          console.log(`[LID] RESOLVE (phone): ${jid} -> ${cleanPhone}@s.whatsapp.net`);
-          return `${cleanPhone}@s.whatsapp.net`;
-        }
+    const row = db
+      .prepare(`SELECT phone_number FROM contacts WHERE jid = ?`)
+      .get(jid) as { phone_number: string | null } | undefined;
+    if (row?.phone_number) {
+      const cleanPhone = row.phone_number.replace(/[^0-9]/g, "");
+      if (cleanPhone) {
+        vlog(`[LID] RESOLVE (phone): ${jid} -> ${cleanPhone}@s.whatsapp.net`);
+        return `${cleanPhone}@s.whatsapp.net`;
       }
+    }
+  } catch (err) {
+    console.error("Error resolving JID (phone-only):", err);
+  }
+  return jid;
+}
 
-      // 2. Secondary resolution via fuzzy name matching
-      const searchName = row.name || row.notify;
-      if (searchName && searchName.trim().length > 2) {
-        const searchTerm = searchName.trim();
-        const matchStmt = db.prepare(`
-          SELECT jid FROM contacts 
-          WHERE jid LIKE '%@s.whatsapp.net' 
+/**
+ * Phone-first, then fuzzy-name resolution. ONLY for read/display paths
+ * where a wrong match merely shows the wrong label (not misroutes a send).
+ * Do NOT use this for storeMessage/storeChat.
+ */
+export function resolveJidSync(jid: string | null | undefined): string | null {
+  if (!jid) return null;
+  if (!jid.endsWith("@lid")) return jid;
+
+  const phone = resolveJidPhoneOnly(jid);
+  if (phone && phone !== jid) return phone;
+
+  const db = getDb();
+  try {
+    const row = db
+      .prepare(`SELECT name, notify FROM contacts WHERE jid = ?`)
+      .get(jid) as { name: string | null; notify: string | null } | undefined;
+    const searchName = row?.name || row?.notify;
+    if (searchName && searchName.trim().length > 2) {
+      const searchTerm = searchName.trim();
+      const matches = db
+        .prepare(`
+          SELECT jid FROM contacts
+          WHERE jid LIKE '%@s.whatsapp.net'
           AND (
-            LOWER(name) = LOWER(?) OR 
+            LOWER(name) = LOWER(?) OR
             LOWER(notify) = LOWER(?) OR
             LOWER(name) LIKE LOWER(?) OR
             LOWER(notify) LIKE LOWER(?)
           )
-        `);
-        const matches = matchStmt.all(searchTerm, searchTerm, `${searchTerm} %`, `${searchTerm} %`) as { jid: string }[];
-        
-        // Only resolve if we find exactly ONE unique match to prevent sending messages to the wrong person
-        if (matches.length === 1) {
-          console.log(`[LID] RESOLVE (fuzzy): ${jid} -> ${matches[0].jid} (matched name: "${searchTerm}")`);
-          return matches[0].jid;
-        }
+        `)
+        .all(searchTerm, searchTerm, `${searchTerm} %`, `${searchTerm} %`) as { jid: string }[];
+      if (matches.length === 1) {
+        vlog(`[LID] RESOLVE (fuzzy): ${jid} -> ${matches[0].jid} (matched: "${searchTerm}")`);
+        return matches[0].jid;
       }
     }
   } catch (err) {
-    console.error("Error resolving JID:", err);
+    console.error("Error resolving JID (fuzzy):", err);
   }
   return jid;
 }
 
 export function storeChat(chat: Partial<Chat> & { jid: string }): void {
   const db = getDb();
-  const resolvedJid = resolveJidSync(chat.jid)!;
+  // Write path uses phone-only resolver to avoid fuzzy-name misroutes.
+  const resolvedJid = resolveJidPhoneOnly(chat.jid)!;
   try {
     const stmt = db.prepare(`
             INSERT INTO chats (jid, name, last_message_time)
@@ -305,16 +390,21 @@ export function storeChat(chat: Partial<Chat> & { jid: string }): void {
 
 export function storeMessage(message: Message): void {
   const db = getDb();
-  const resolvedChatJid = resolveJidSync(message.chat_jid)!;
-  const resolvedSender = resolveJidSync(message.sender);
+  const resolvedChatJid = resolveJidPhoneOnly(message.chat_jid)!;
+  const resolvedSender = resolveJidPhoneOnly(message.sender);
   
   try {
     // Only insert the chat if it doesn't exist, we don't need to update last_message_time twice
     db.prepare(`INSERT OR IGNORE INTO chats (jid, last_message_time) VALUES (?, ?)`).run(resolvedChatJid, message.timestamp.toISOString());
 
     const stmt = db.prepare(`
-            INSERT OR REPLACE INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+            INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
             VALUES (@id, @chat_jid, @sender, @content, @timestamp, @is_from_me)
+            ON CONFLICT(id, chat_jid) DO UPDATE SET
+                sender = excluded.sender,
+                content = excluded.content,
+                timestamp = excluded.timestamp,
+                is_from_me = excluded.is_from_me
         `);
 
     stmt.run({
@@ -343,12 +433,26 @@ export function storeMessage(message: Message): void {
 export function storeMessagesBatch(messages: Message[]): void {
   if (messages.length === 0) return;
   const db = getDb();
+  // Per-batch resolver cache: same JID resolves to same target N times -> 1 query.
+  const resolveCache = new Map<string, string | null>();
+  const resolve = (jid: string | null | undefined): string | null => {
+    if (!jid) return null;
+    if (resolveCache.has(jid)) return resolveCache.get(jid)!;
+    const r = resolveJidPhoneOnly(jid);
+    resolveCache.set(jid, r);
+    return r;
+  };
   try {
     db.exec("BEGIN TRANSACTION");
     const insertChatStmt = db.prepare(`INSERT OR IGNORE INTO chats (jid, last_message_time) VALUES (?, ?)`);
     const insertMsgStmt = db.prepare(`
-            INSERT OR REPLACE INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+            INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
             VALUES (@id, @chat_jid, @sender, @content, @timestamp, @is_from_me)
+            ON CONFLICT(id, chat_jid) DO UPDATE SET
+                sender = excluded.sender,
+                content = excluded.content,
+                timestamp = excluded.timestamp,
+                is_from_me = excluded.is_from_me
         `);
     const updateChatTimeStmt = db.prepare(`
             UPDATE chats
@@ -357,8 +461,8 @@ export function storeMessagesBatch(messages: Message[]): void {
         `);
 
     for (const msg of messages) {
-      const resolvedChatJid = resolveJidSync(msg.chat_jid)!;
-      const resolvedSender = resolveJidSync(msg.sender) ?? null;
+      const resolvedChatJid = resolve(msg.chat_jid)!;
+      const resolvedSender = resolve(msg.sender);
       const isoTime = msg.timestamp.toISOString();
       
       insertChatStmt.run(resolvedChatJid, isoTime);
@@ -397,6 +501,7 @@ function rowToMessage(row: any): Message {
     id: row.id,
     chat_jid: row.chat_jid,
     sender: row.sender,
+    sender_name: row.sender_name ?? null,
     content: row.content,
     timestamp: parseDateSafe(row.timestamp)!,
     is_from_me: Boolean(row.is_from_me),
@@ -411,6 +516,7 @@ function rowToChat(row: any): Chat {
     last_message_time: parseDateSafe(row.last_message_time),
     last_message: row.last_message,
     last_sender: row.last_sender,
+    last_sender_name: row.last_sender_name ?? null,
     last_is_from_me:
       row.last_is_from_me !== null ? Boolean(row.last_is_from_me) : null,
   };
@@ -425,9 +531,12 @@ export function getMessages(
   try {
     const offset = page * limit;
     const stmt = db.prepare(`
-            SELECT m.*, c.name as chat_name
+            SELECT m.*,
+              c.name as chat_name,
+              COALESCE(ct.name, ct.notify, ct.phone_number) as sender_name
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
+            LEFT JOIN contacts ct ON m.sender = ct.jid
             WHERE m.chat_jid = ?
             ORDER BY m.timestamp DESC
             LIMIT ?
@@ -482,6 +591,7 @@ export function getChats(
                     ? `,
                 (SELECT m.content FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_message,
                 (SELECT m.sender FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender,
+                (SELECT COALESCE(ct2.name, ct2.notify, ct2.phone_number) FROM messages m LEFT JOIN contacts ct2 ON m.sender = ct2.jid WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender_name,
                 (SELECT m.is_from_me FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_is_from_me
                 `
                     : ""
@@ -550,6 +660,7 @@ export function getChat(
                     ? `,
                 (SELECT m.content FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_message,
                 (SELECT m.sender FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender,
+                (SELECT COALESCE(ct2.name, ct2.notify, ct2.phone_number) FROM messages m LEFT JOIN contacts ct2 ON m.sender = ct2.jid WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_sender_name,
                 (SELECT m.is_from_me FROM messages m WHERE m.chat_jid = c.jid ORDER BY m.timestamp DESC LIMIT 1) as last_is_from_me
                 `
                     : ""
@@ -580,13 +691,17 @@ export function getMessagesAround(
     after: Message[];
   } = { before: [], target: null, after: [] };
 
+  const MSG_WITH_SENDER = `
+    SELECT m.*,
+      c.name as chat_name,
+      COALESCE(ct.name, ct.notify, ct.phone_number) as sender_name
+    FROM messages m
+    JOIN chats c ON m.chat_jid = c.jid
+    LEFT JOIN contacts ct ON m.sender = ct.jid
+  `;
+
   try {
-    const targetStmt = db.prepare(`
-             SELECT m.*, c.name as chat_name
-             FROM messages m
-             JOIN chats c ON m.chat_jid = c.jid
-             WHERE m.id = ?
-        `);
+    const targetStmt = db.prepare(`${MSG_WITH_SENDER} WHERE m.id = ?`);
     const targetRow = targetStmt.get(messageId) as any | undefined;
 
     if (!targetRow) {
@@ -597,30 +712,20 @@ export function getMessagesAround(
     const chatJid = result.target.chat_jid;
 
     const beforeStmt = db.prepare(`
-            SELECT m.*, c.name as chat_name
-            FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.chat_jid = ? AND m.timestamp < ?
-            ORDER BY m.timestamp DESC
-            LIMIT ?
-        `);
-    const beforeRows = beforeStmt.all(
-      chatJid,
-      targetTimestamp,
-      before,
-    ) as any[];
-    result.before = beforeRows.map(rowToMessage).reverse();
+      ${MSG_WITH_SENDER}
+      WHERE m.chat_jid = ? AND m.timestamp < ?
+      ORDER BY m.timestamp DESC
+      LIMIT ?
+    `);
+    result.before = (beforeStmt.all(chatJid, targetTimestamp, before) as any[]).map(rowToMessage).reverse();
 
     const afterStmt = db.prepare(`
-            SELECT m.*, c.name as chat_name
-            FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.chat_jid = ? AND m.timestamp > ?
-            ORDER BY m.timestamp ASC
-            LIMIT ?
-        `);
-    const afterRows = afterStmt.all(chatJid, targetTimestamp, after) as any[];
-    result.after = afterRows.map(rowToMessage);
+      ${MSG_WITH_SENDER}
+      WHERE m.chat_jid = ? AND m.timestamp > ?
+      ORDER BY m.timestamp ASC
+      LIMIT ?
+    `);
+    result.after = (afterStmt.all(chatJid, targetTimestamp, after) as any[]).map(rowToMessage);
 
     return result;
   } catch (error) {
@@ -674,6 +779,21 @@ export function searchDbForContacts(
   }
 }
 
+/** Escape FTS5 special characters and wrap as a phrase for safe MATCH. */
+function escapeFtsQuery(q: string): string {
+  // Replace internal double-quote with two double-quotes, wrap in quotes -> phrase match.
+  return `"${q.replace(/"/g, '""')}"`;
+}
+
+function ftsAvailable(db: DatabaseSync): boolean {
+  try {
+    db.prepare(`SELECT 1 FROM messages_fts LIMIT 1`).get();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function searchMessages(
   searchQuery: string,
   chatJid?: string | null,
@@ -683,26 +803,45 @@ export function searchMessages(
   const db = getDb();
   try {
     const offset = page * limit;
-    const searchPattern = `%${searchQuery}%`;
-    let sql = `
-            SELECT m.*, COALESCE(c.name, ct.name, ct.notify, ct.phone_number) as chat_name
+    const useFts = ftsAvailable(db) && searchQuery.trim().length > 0;
+
+    let sql: string;
+    const params: (string | number | null)[] = [];
+
+    if (useFts) {
+      sql = `
+            SELECT m.*,
+              COALESCE(c.name, ct_chat.name, ct_chat.notify, ct_chat.phone_number) as chat_name,
+              COALESCE(ct_sender.name, ct_sender.notify, ct_sender.phone_number) as sender_name
+            FROM messages_fts f
+            JOIN messages m ON m.rowid = f.rowid
+            JOIN chats c ON m.chat_jid = c.jid
+            LEFT JOIN contacts ct_chat ON c.jid = ct_chat.jid
+            LEFT JOIN contacts ct_sender ON m.sender = ct_sender.jid
+            WHERE messages_fts MATCH ?
+        `;
+      params.push(escapeFtsQuery(searchQuery));
+    } else {
+      sql = `
+            SELECT m.*,
+              COALESCE(c.name, ct_chat.name, ct_chat.notify, ct_chat.phone_number) as chat_name,
+              COALESCE(ct_sender.name, ct_sender.notify, ct_sender.phone_number) as sender_name
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            LEFT JOIN contacts ct ON c.jid = ct.jid
+            LEFT JOIN contacts ct_chat ON c.jid = ct_chat.jid
+            LEFT JOIN contacts ct_sender ON m.sender = ct_sender.jid
             WHERE LOWER(m.content) LIKE LOWER(?)
         `;
-    const params: (string | number | null)[] = [searchPattern];
+      params.push(`%${searchQuery}%`);
+    }
 
     if (chatJid) {
       sql += ` AND m.chat_jid = ?`;
       params.push(chatJid);
     }
 
-    sql += ` ORDER BY m.timestamp DESC`;
-    sql += ` LIMIT ?`;
-    params.push(limit);
-    sql += ` OFFSET ?`;
-    params.push(offset);
+    sql += ` ORDER BY m.timestamp DESC LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
 
     const stmt = db.prepare(sql);
     const rows = stmt.all(...params) as any[];

@@ -6,3 +6,7 @@ auth_info/
 wa-logs.txt
 mcp-logs.txt
 .env
+
+# Local agent tooling (skills, lock files)
+.windsurf/
+skills-lock.json

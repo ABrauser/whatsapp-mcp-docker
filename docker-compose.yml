@@ -5,11 +5,16 @@ services:
     restart: unless-stopped
     ports:
       - "3010:3010"
+    env_file:
+      - .env
     environment:
       - MCP_PORT=3010
       - LOG_LEVEL=info
       - WHATSAPP_MCP_DATA_DIR=/app/data
       - WHATSAPP_AUTH_DIR=/app/auth_info
+      # Read from .env (do NOT hardcode here):
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
+      - TZ=${TZ:-Europe/Berlin}
     volumes:
       - whatsapp_data:/app/data
       - whatsapp_auth:/app/auth_info

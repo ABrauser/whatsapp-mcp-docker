@@ -16,6 +16,15 @@ services:
       - WHATSAPP_DEBUG=true
       - WHATSAPP_MCP_DATA_DIR=/app/data
       - WHATSAPP_AUTH_DIR=/app/auth_info
+      # Set this in Portainer's stack environment UI. Leave empty ONLY if the
+      # container is reachable only from trusted hosts (e.g. localhost).
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
     volumes:
       - /opt/docker/whatsapp-mcp/data:/app/data
       - /opt/docker/whatsapp-mcp/auth_info:/app/auth_info
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:3010/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3

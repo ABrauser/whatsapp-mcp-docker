@@ -19,7 +19,7 @@ import {
   storeChat,
   storeContact,
   debugLidMapping,
-  migrateLidMessages,
+  scheduleLidMigration,
   type Message as DbMessage,
 } from "./database.ts";
 
@@ -92,7 +92,9 @@ function parseMessageForDb(msg: WAMessage): DbMessage | null {
   if (!msg.key.fromMe && !senderJid && !isJidGroup(msg.key.remoteJid)) {
     senderJid = msg.key.remoteJid;
   }
-  if (msg.key.fromMe && !isJidGroup(msg.key.remoteJid)) {
+  // For self-sent messages, normalize sender to null in 1:1 chats AND groups
+  // so downstream `is_from_me` is the single source of truth for "Me".
+  if (msg.key.fromMe) {
     senderJid = null;
   }
 
@@ -112,11 +114,14 @@ export interface WhatsAppConnection {
 
 let isShuttingDown = false;
 let reconnectAttempts = 0;
+let groupFetchPending = false;
 
 export async function startWhatsAppConnection(
   logger: P.Logger,
-  connectionHolder?: WhatsAppConnection
+  connectionHolder?: WhatsAppConnection,
+  onLoggedOut?: () => void
 ): Promise<WhatsAppConnection> {
+  // DB already initialized in main.ts; safe-no-op here
   initializeDatabase();
 
   if (process.env.WHATSAPP_DEBUG === "true") {
@@ -124,6 +129,23 @@ export async function startWhatsAppConnection(
   }
 
   const holder: WhatsAppConnection = connectionHolder || { sock: null };
+
+  // Tear down previous socket if any (reconnect path)
+  if (holder.sock) {
+    try {
+      holder.sock.ev.removeAllListeners("connection.update");
+      holder.sock.ev.removeAllListeners("messages.upsert");
+      holder.sock.ev.removeAllListeners("messaging-history.set");
+      holder.sock.ev.removeAllListeners("chats.update");
+      holder.sock.ev.removeAllListeners("contacts.upsert");
+      holder.sock.ev.removeAllListeners("contacts.update");
+      holder.sock.ev.removeAllListeners("groups.upsert");
+      holder.sock.ev.removeAllListeners("groups.update");
+      holder.sock.ev.removeAllListeners("creds.update");
+      holder.sock.end(undefined);
+    } catch { /* ignore */ }
+    holder.sock = null;
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version, isLatest } = await fetchLatestBaileysVersion();
@@ -149,10 +171,10 @@ export async function startWhatsAppConnection(
 
       if (qr) {
         const qrUrl = `https://quickchart.io/qr?text=${encodeURIComponent(qr)}&size=300`;
-        logger.info(
-          { qrCodeData: qr },
-          "QR Code received. Scan with your WhatsApp app."
-        );
+        // Raw QR data is sensitive (full session-pairing key valid for ~20s).
+        // Keep it at debug so it's not in the default log file.
+        logger.debug({ qrCodeData: qr }, "QR Code received.");
+        logger.info("QR Code received. Scan with your WhatsApp app via the URL printed below.");
         // Log the QR URL prominently so it's visible in docker logs
         console.log("\n╔══════════════════════════════════════════════════════╗");
         console.log("║          SCAN QR CODE WITH WHATSAPP                 ║");
@@ -181,17 +203,24 @@ export async function startWhatsAppConnection(
           reconnectAttempts++;
           const delay = Math.min(Math.pow(2, reconnectAttempts) * 1000, 60000); // Exponential backoff capped at 60s
           logger.info(`Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts})...`);
-          
+
           setTimeout(() => {
             if (!isShuttingDown) {
-              startWhatsAppConnection(logger, holder);
+              startWhatsAppConnection(logger, holder, onLoggedOut).catch((err) =>
+                logger.error({ err }, "Reconnect attempt failed")
+              );
             }
           }, delay);
         } else {
           logger.error(
             "Connection closed: Logged Out. Please delete auth_info and restart."
           );
-          process.exit(1);
+          if (onLoggedOut) {
+            onLoggedOut();
+          } else {
+            // Fallback if no shutdown handler wired up
+            process.exit(1);
+          }
         }
       } else if (connection === "open") {
         reconnectAttempts = 0; // Reset attempts on successful connection
@@ -199,24 +228,31 @@ export async function startWhatsAppConnection(
         console.log(`\n✅ WhatsApp connected as: ${sock.user?.name}\n`);
 
         // Fetch all group names once after connect (groupFetchAllParticipating is more
-        // reliable than per-group groupMetadata, especially with the @LID protocol)
-        setTimeout(async () => {
-          try {
-            logger.info("Fetching all group names via groupFetchAllParticipating...");
-            const allGroups = await sock.groupFetchAllParticipating();
-            let resolved = 0;
-            for (const [jid, meta] of Object.entries(allGroups)) {
-              if (meta.subject) {
-                storeChat({ jid, name: meta.subject });
-                resolved++;
+        // reliable than per-group groupMetadata, especially with the @LID protocol).
+        // Guard against parallel fetches across reconnects.
+        if (!groupFetchPending) {
+          groupFetchPending = true;
+          setTimeout(async () => {
+            try {
+              logger.info("Fetching all group names via groupFetchAllParticipating...");
+              const allGroups = await sock.groupFetchAllParticipating();
+              let resolved = 0;
+              for (const [jid, meta] of Object.entries(allGroups)) {
+                if (meta.subject) {
+                  storeChat({ jid, name: meta.subject });
+                  resolved++;
+                }
               }
+              logger.info(`[Group] Resolved ${resolved} group names.`);
+            } catch (err) {
+              logger.warn({ err }, "Error fetching group names on startup");
+            } finally {
+              groupFetchPending = false;
             }
-            logger.info(`[Group] Resolved ${resolved} group names.`);
-            console.log(`[Group] Resolved ${resolved} group names.`);
-          } catch (err) {
-            logger.warn({ err }, "Error fetching group names on startup");
-          }
-        }, 5000); // Wait 5s after connect to not overload the initial handshake
+          }, 5000); // Wait 5s after connect to not overload the initial handshake
+        } else {
+          logger.debug("Group fetch already pending, skipping duplicate scheduling.");
+        }
       }
     }
 
@@ -236,8 +272,8 @@ export async function startWhatsAppConnection(
           });
         }
       }
-      // After storing new contact info, try to resolve any remaining @lid chats
-      migrateLidMessages();
+      // Debounced: avoid scanning whole @lid table on every contacts batch.
+      scheduleLidMigration();
     };
 
     if (events["messaging-history.set"]) {
@@ -284,14 +320,16 @@ export async function startWhatsAppConnection(
         for (const msg of messages) {
           const parsed = parseMessageForDb(msg);
           if (parsed) {
-            logger.info(
+            // Content snippets are user data — keep them at debug only.
+            logger.debug(
               {
                 msgId: parsed.id,
                 chatId: parsed.chat_jid,
                 fromMe: parsed.is_from_me,
                 sender: parsed.sender,
+                preview: parsed.content.substring(0, 50),
               },
-              `Storing message: ${parsed.content.substring(0, 50)}...`
+              "Storing message"
             );
             storeMessage(parsed);
           } else {
@@ -371,6 +409,44 @@ export function stopWhatsAppConnection(holder: WhatsAppConnection | null) {
       // Ignore errors during end
     }
   }
+}
+
+// ─── Lazy group-name resolution ────────────────────────────────────
+// MCP tools may surface groups whose name was not yet populated. Trigger a
+// debounced background fetch so the next call returns enriched data.
+let lazyGroupFetchTimer: NodeJS.Timeout | null = null;
+let lazyGroupFetchInflight = false;
+export function scheduleLazyGroupNameFetch(
+  holder: WhatsAppConnection | null,
+  logger: P.Logger,
+  delayMs: number = 1500
+): void {
+  if (!holder?.sock?.user) return;
+  if (lazyGroupFetchTimer) clearTimeout(lazyGroupFetchTimer);
+  lazyGroupFetchTimer = setTimeout(async () => {
+    lazyGroupFetchTimer = null;
+    if (lazyGroupFetchInflight) return;
+    const sock = holder.sock;
+    if (!sock?.user) return;
+    lazyGroupFetchInflight = true;
+    try {
+      const all = await sock.groupFetchAllParticipating();
+      let updated = 0;
+      for (const [jid, meta] of Object.entries(all)) {
+        if (meta.subject) {
+          storeChat({ jid, name: meta.subject });
+          updated++;
+        }
+      }
+      if (updated > 0) {
+        logger.info(`[Group] Lazy-fetch updated ${updated} group names.`);
+      }
+    } catch (err) {
+      logger.warn({ err }, "Lazy group-name fetch failed");
+    } finally {
+      lazyGroupFetchInflight = false;
+    }
+  }, delayMs);
 }
 
 export async function sendWhatsAppMessage(

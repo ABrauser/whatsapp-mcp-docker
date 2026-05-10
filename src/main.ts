@@ -1,12 +1,18 @@
 import pino from "pino";
+import fs from "node:fs";
 import { initializeDatabase, closeDatabase } from "./database.ts";
 import { startWhatsAppConnection, stopWhatsAppConnection, type WhatsAppConnection } from "./whatsapp.ts";
 import { startMcpServer } from "./mcp.ts";
 import { type Server } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-const port = parseInt(process.env.MCP_PORT || "3010", 10);
+const port = Number.parseInt(process.env.MCP_PORT || "3010", 10);
+if (!Number.isFinite(port) || port < 1 || port > 65535) {
+  console.error(`❌ Invalid MCP_PORT: "${process.env.MCP_PORT}"`);
+  process.exit(1);
+}
 const dataDir = process.env.WHATSAPP_MCP_DATA_DIR || ".";
+fs.mkdirSync(dataDir, { recursive: true });
 
 const waLogger = pino(
   {
@@ -43,7 +49,7 @@ async function main() {
 
     mcpLogger.info("Attempting to connect to WhatsApp...");
     console.log("⏳ Connecting to WhatsApp...");
-    whatsappConnection = await startWhatsAppConnection(waLogger);
+    whatsappConnection = await startWhatsAppConnection(waLogger, undefined, () => shutdown("LOGGED_OUT"));
     mcpLogger.info("WhatsApp connection process initiated.");
   } catch (error: any) {
     mcpLogger.fatal(
@@ -69,14 +75,18 @@ async function main() {
   mcpLogger.info("Application setup complete. Running...");
 }
 
+let shuttingDown = false;
 async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   mcpLogger.info(`Received ${signal}. Shutting down gracefully...`);
   console.log(`\n🛑 Received ${signal}. Shutting down...`);
 
   if (httpServer) {
+    const srv = httpServer;
     mcpLogger.info("Closing HTTP server...");
     await new Promise<void>((resolve) => {
-      httpServer.close(() => resolve());
+      srv.close(() => resolve());
     });
   }
 
@@ -101,7 +111,7 @@ async function shutdown(signal: string) {
   mcpLogger.flush();
 
   mcpLogger.info("Shutdown complete.");
-  process.exit(0);
+  process.exit(signal === "LOGGED_OUT" ? 1 : 0);
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));

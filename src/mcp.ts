@@ -14,11 +14,10 @@ import {
   getMessagesAround,
   searchDbForContacts,
   searchMessages,
-  getContactName,
 } from "./database.ts";
 
-import { sendWhatsAppMessage, type WhatsAppConnection } from "./whatsapp.ts";
-import { type P } from "pino";
+import { sendWhatsAppMessage, scheduleLazyGroupNameFetch, type WhatsAppConnection } from "./whatsapp.ts";
+import type { Logger } from "pino";
 
 const TZ = process.env.TZ || "Europe/Berlin";
 
@@ -29,18 +28,20 @@ function toLocalTime(date: Date): string {
 }
 
 function formatDbMessageForJson(msg: DbMessage) {
-  const contactName = getContactName(msg.sender);
+  // is_from_me is the single source of truth for "Me"; sender JID may still be
+  // set in groups but we want consistent display.
+  const senderDisplay = msg.is_from_me
+    ? "Me"
+    : msg.sender
+      ? (msg.sender_name ?? msg.sender.split("@")[0])
+      : "Unknown";
   return {
     id: msg.id,
     chat_jid: msg.chat_jid,
     chat_name: msg.chat_name ?? "Unknown Chat",
     sender_jid: msg.sender ?? null,
-    sender_name: contactName,
-    sender_display: msg.sender
-      ? (contactName ?? msg.sender.split("@")[0])
-      : msg.is_from_me
-        ? "Me"
-        : "Unknown",
+    sender_name: msg.sender_name ?? null,
+    sender_display: senderDisplay,
     content: msg.content,
     timestamp: toLocalTime(msg.timestamp),
     is_from_me: msg.is_from_me,
@@ -48,17 +49,16 @@ function formatDbMessageForJson(msg: DbMessage) {
 }
 
 function formatDbChatForJson(chat: DbChat) {
-  const senderName = getContactName(chat.last_sender);
   return {
     jid: chat.jid,
-    name: chat.name ?? chat.jid.split("@")[0] ?? "Unknown Chat",
+    name: chat.name ?? chat.jid.split("@")[0] ?? chat.jid,
     is_group: chat.jid.endsWith("@g.us"),
     last_message_time: chat.last_message_time ? toLocalTime(chat.last_message_time) : null,
     last_message_preview: chat.last_message ?? null,
     last_sender_jid: chat.last_sender ?? null,
-    last_sender_name: senderName,
+    last_sender_name: chat.last_sender_name ?? null,
     last_sender_display: chat.last_sender
-      ? (senderName ?? chat.last_sender.split("@")[0])
+      ? (chat.last_sender_name ?? chat.last_sender.split("@")[0])
       : chat.last_is_from_me
         ? "Me"
         : null,
@@ -66,17 +66,19 @@ function formatDbChatForJson(chat: DbChat) {
   };
 }
 
+/**
+ * Build a fresh MCP server with all tools registered. Per-request creation is
+ * required for the stateless Streamable-HTTP pattern to avoid leaking listeners
+ * across `transport.connect()` calls.
+ */
 function createMcpServer(
   connection: WhatsAppConnection | null,
-  mcpLogger: P.Logger,
-  waLogger: P.Logger,
+  mcpLogger: Logger,
+  waLogger: Logger,
 ): McpServer {
   const server = new McpServer({
     name: "whatsapp-mcp-docker",
     version: "1.0.0",
-    capabilities: {
-      tools: {},
-    },
   });
 
   // ─── Tool: search_contacts ────────────────────────────────────────
@@ -262,6 +264,14 @@ function createMcpServer(
           };
         }
         const formattedChats = chats.map(formatDbChatForJson);
+        // If any group is unnamed, kick off a lazy background refresh of group
+        // metadata so the next call has nicer names. Non-blocking.
+        const hasUnnamedGroup = chats.some(
+          (c) => c.jid.endsWith("@g.us") && !c.name
+        );
+        if (hasUnnamedGroup) {
+          scheduleLazyGroupNameFetch(connection, waLogger);
+        }
         return {
           content: [
             {
@@ -308,6 +318,9 @@ function createMcpServer(
           };
         }
         const formattedChat = formatDbChatForJson(chat);
+        if (chat.jid.endsWith("@g.us") && !chat.name) {
+          scheduleLazyGroupNameFetch(connection, waLogger);
+        }
         return {
           content: [
             {
@@ -578,41 +591,80 @@ function createMcpServer(
 
 export async function startMcpServer(
   connection: WhatsAppConnection | null,
-  mcpLogger: P.Logger,
-  waLogger: P.Logger,
+  mcpLogger: Logger,
+  waLogger: Logger,
   port: number,
 ): Promise<{ httpServer: Server; mcpServer: McpServer }> {
   mcpLogger.info("Initializing MCP server with Streamable HTTP transport...");
 
+  // Singleton instance returned for shutdown bookkeeping; runtime tool calls
+  // use per-request server instances created in the POST /sse handler.
   const mcpServer = createMcpServer(connection, mcpLogger, waLogger);
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: "1mb" }));
 
-  // ─── Health check endpoint ────────────────────────────────────────
+  const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN?.trim() || null;
+  if (!AUTH_TOKEN) {
+    mcpLogger.warn(
+      "MCP_AUTH_TOKEN not set — /sse is open to anyone who can reach the port. Set MCP_AUTH_TOKEN for production."
+    );
+    console.warn(
+      "⚠️  MCP_AUTH_TOKEN not set. /sse is unauthenticated. Bind to localhost or set the token."
+    );
+  }
+
+  // ─── Bearer-token auth middleware (only on /sse) ─────────────
+  const requireAuth = (req: Request, res: Response, next: () => void) => {
+    if (!AUTH_TOKEN) return next();
+    const hdr = req.header("authorization") || "";
+    const expected = `Bearer ${AUTH_TOKEN}`;
+    // Constant-time-ish compare (Node has no native, but length check first).
+    if (hdr.length !== expected.length || hdr !== expected) {
+      mcpLogger.warn(`Unauthorized ${req.method} ${req.path} from ${req.ip}`);
+      res.status(401).json({
+        jsonrpc: "2.0",
+        error: { code: -32001, message: "Unauthorized" },
+        id: null,
+      });
+      return;
+    }
+    next();
+  };
+
+  // ─── Health check endpoint ──────────────────────────────────────
   app.get("/health", (_req: Request, res: Response) => {
-    res.json({
-      status: "ok",
-      whatsapp_connected: !!(connection && connection.sock && connection.sock.user),
+    const connected = !!(connection && connection.sock && connection.sock.user);
+    const status = connected ? 200 : 503;
+    res.status(status).json({
+      status: connected ? "ok" : "degraded",
+      whatsapp_connected: connected,
       timestamp: toLocalTime(new Date()),
     });
   });
 
-  // ─── Streamable HTTP: POST /sse — stateless mode ─────────────────
-  app.post("/sse", async (req: Request, res: Response) => {
+  // ─── Streamable HTTP: POST /sse — stateless mode ─────────────
+  // Per the MCP TS SDK stateless example, create a fresh McpServer + transport
+  // per request and tear them down on response close. Using a single shared
+  // server across many connect() calls leaks listeners.
+  app.post("/sse", requireAuth, async (req: Request, res: Response) => {
     mcpLogger.info(`POST /sse from ${req.ip}`);
 
+    const reqServer = createMcpServer(connection, mcpLogger, waLogger);
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined, // stateless
+    });
+
+    res.on("close", () => {
+      transport.close().catch((err) => {
+        mcpLogger.error(`Error closing transport: ${err.message}`);
+      });
+      reqServer.close().catch((err) => {
+        mcpLogger.error(`Error closing per-request McpServer: ${err.message}`);
+      });
+    });
+
     try {
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined, // stateless
-      });
-
-      res.on("close", () => {
-        transport.close().catch((err) => {
-          mcpLogger.error(`Error closing transport: ${err.message}`);
-        });
-      });
-
-      await mcpServer.connect(transport);
+      await reqServer.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (error: any) {
       mcpLogger.error(`Error handling POST /sse: ${error.message}`);
@@ -626,8 +678,8 @@ export async function startMcpServer(
     }
   });
 
-  // ─── GET & DELETE not supported in stateless mode ─────────────────
-  app.get("/sse", (_req: Request, res: Response) => {
+  // ─── GET & DELETE not supported in stateless mode ─────────────
+  app.get("/sse", requireAuth, (_req: Request, res: Response) => {
     res.status(405).set("Allow", "POST").json({
       jsonrpc: "2.0",
       error: { code: -32000, message: "Method not allowed in stateless mode. Use POST." },
@@ -635,7 +687,7 @@ export async function startMcpServer(
     });
   });
 
-  app.delete("/sse", (_req: Request, res: Response) => {
+  app.delete("/sse", requireAuth, (_req: Request, res: Response) => {
     res.status(405).set("Allow", "POST").json({
       jsonrpc: "2.0",
       error: { code: -32000, message: "Method not allowed in stateless mode." },
@@ -643,15 +695,23 @@ export async function startMcpServer(
     });
   });
 
-  // ─── Start the HTTP server ────────────────────────────────────────
+  // ─── Start the HTTP server ──────────────────────────────────
   return new Promise((resolve) => {
     const httpServer = app.listen(port, "0.0.0.0", () => {
       mcpLogger.info(`MCP server listening on http://0.0.0.0:${port}`);
       console.log(`\n🚀 MCP Server ready at http://0.0.0.0:${port}`);
       console.log(`   MCP endpoint:    http://0.0.0.0:${port}/sse`);
       console.log(`   Health check:    http://0.0.0.0:${port}/health`);
+      console.log(
+        AUTH_TOKEN
+          ? `   Auth:            Bearer token required (set via MCP_AUTH_TOKEN)`
+          : `   Auth:            DISABLED — set MCP_AUTH_TOKEN to enable`
+      );
       console.log(`\n   Configure your MCP client with:`);
-      console.log(`   { "url": "http://<YOUR-IP>:${port}/sse" }\n`);
+      const exampleHeaders = AUTH_TOKEN
+        ? `, "headers": { "Authorization": "Bearer <YOUR_TOKEN>" }`
+        : "";
+      console.log(`   { "url": "http://<YOUR-IP>:${port}/sse"${exampleHeaders} }\n`);
       resolve({ httpServer, mcpServer });
     });
   });

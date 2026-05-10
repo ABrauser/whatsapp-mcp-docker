@@ -1,34 +1,32 @@
-FROM node:23-alpine
+# syntax=docker/dockerfile:1.7
 
-# Install build dependencies for native modules
-RUN apk add --no-cache python3 make g++ git
+# ── Stage 1: install deps with build toolchain ──────────────────────
+FROM node:24-alpine AS deps
+RUN apk add --no-cache python3 make g++
+WORKDIR /app
+COPY package.json package-lock.json* ./
+# Reproducible install; falls back to npm install only if no lockfile present.
+RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
 
+# ── Stage 2: minimal runtime ────────────────────────────────────────
+FROM node:24-alpine AS runtime
 WORKDIR /app
 
-# Copy package files and install dependencies
+# Only ship runtime artifacts, no compilers in the final image.
+COPY --from=deps /app/node_modules ./node_modules
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev 2>/dev/null || npm install
-
-# Remove build dependencies to reduce image size
-RUN apk del python3 make g++
-
-# Copy source code
 COPY tsconfig.json ./
 COPY src ./src
 
-# Create directories for persistent data
 RUN mkdir -p /app/data /app/auth_info
 
-# Environment variables
 ENV MCP_PORT=3010
 ENV WHATSAPP_MCP_DATA_DIR=/app/data
 ENV WHATSAPP_AUTH_DIR=/app/auth_info
 ENV LOG_LEVEL=info
+# MCP_AUTH_TOKEN intentionally unset — must be provided at runtime.
 
-# Expose MCP SSE port
 EXPOSE 3010
 
-
-
-# Run the server
+# Node 24+: node:sqlite is stable, type-stripping is on by default for .ts entry.
 CMD ["node", "src/main.ts"]
