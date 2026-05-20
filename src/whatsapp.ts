@@ -583,3 +583,47 @@ export async function sendWhatsAppMessage(
     return;
   }
 }
+
+export async function editWhatsAppMessage(
+  logger: P.Logger,
+  holder: WhatsAppConnection | null,
+  chatJid: string,
+  messageId: string,
+  newText: string,
+): Promise<boolean> {
+  const sock = holder?.sock;
+  if (!sock || !sock.user) {
+    logger.error("Cannot edit message: WhatsApp socket not connected or initialized.");
+    return false;
+  }
+  if (!chatJid || !messageId) {
+    logger.error("Cannot edit message: chatJid or messageId is missing.");
+    return false;
+  }
+  if (!newText) {
+    logger.error("Cannot edit message: New text is empty.");
+    return false;
+  }
+
+  try {
+    const normalizedJid = jidNormalizedUser(chatJid);
+    logger.info(
+      { chatJid: normalizedJid, messageId },
+      `Editing message: ${newText.substring(0, 50)}...`
+    );
+    await sock.sendMessage(normalizedJid, {
+      text: newText,
+      edit: {
+        remoteJid: normalizedJid,
+        id: messageId,
+        fromMe: true,
+      },
+    });
+    logger.info({ chatJid: normalizedJid, messageId }, "Message edited successfully");
+    return true;
+  } catch (error) {
+    logger.error({ err: error, chatJid, messageId }, "Failed to edit message");
+    return false;
+  }
+}
+

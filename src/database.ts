@@ -941,6 +941,48 @@ export function searchMessages(
   }
 }
 
+/**
+ * Fetch a single message by its ID. Returns null if not found.
+ * Used by edit_message to validate the target before sending the edit.
+ */
+export function getMessageById(messageId: string): Message | null {
+  const db = getDb();
+  try {
+    const row = db.prepare(`
+      SELECT m.*,
+        COALESCE(c.name, cr_chat.display_name) AS chat_name,
+        cr_sender.display_name AS sender_name
+      FROM messages m
+      JOIN chats c ON m.chat_jid = c.jid
+      LEFT JOIN contacts_resolved cr_chat ON c.jid = cr_chat.jid
+      LEFT JOIN contacts_resolved cr_sender ON m.sender = cr_sender.jid
+      WHERE m.id = ?
+      LIMIT 1
+    `).get(messageId) as any | undefined;
+    return row ? rowToMessage(row) : null;
+  } catch (error) {
+    console.error("Error getting message by ID:", error);
+    return null;
+  }
+}
+
+/**
+ * Update the content of an existing message in the local DB.
+ * Called after a successful WhatsApp edit so local state stays in sync.
+ */
+export function updateMessageContent(messageId: string, chatJid: string, newContent: string): boolean {
+  const db = getDb();
+  try {
+    const result = db.prepare(
+      `UPDATE messages SET content = ? WHERE id = ? AND chat_jid = ?`
+    ).run(newContent, messageId, chatJid);
+    return (result.changes ?? 0) > 0;
+  } catch (error) {
+    console.error("Error updating message content:", error);
+    return false;
+  }
+}
+
 export function closeDatabase(): void {
   if (dbInstance) {
     try {

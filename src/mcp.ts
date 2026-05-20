@@ -16,9 +16,11 @@ import {
   getMessagesAround,
   searchDbForContacts,
   searchMessages,
+  getMessageById,
+  updateMessageContent,
 } from "./database.ts";
 
-import { sendWhatsAppMessage, scheduleLazyGroupNameFetch, type WhatsAppConnection } from "./whatsapp.ts";
+import { sendWhatsAppMessage, editWhatsAppMessage, scheduleLazyGroupNameFetch, type WhatsAppConnection } from "./whatsapp.ts";
 import { getOverride } from "./contactOverrides.ts";
 import { resolveByPushName } from "./contactResolver.ts";
 import { getDb } from "./database.ts";
@@ -793,6 +795,118 @@ function createMcpServer(
               type: "text",
               text: `Error searching messages ${searchScope}: ${error.message}`,
             },
+          ],
+        };
+      }
+    },
+  );
+
+  // ─── Tool: edit_message ───────────────────────────────────────────
+  server.tool(
+    "edit_message",
+    {
+      message_id: z
+        .string()
+        .describe("The ID of the message to edit (must be a message sent by you)"),
+      chat_jid: z
+        .string()
+        .describe("The JID of the chat the message belongs to"),
+      new_text: z
+        .string()
+        .min(1)
+        .describe("The new text content to replace the original message with"),
+    },
+    async ({ message_id, chat_jid, new_text }) => {
+      mcpLogger.info(
+        {
+          audit: "edit_message",
+          message_id,
+          chat_jid,
+          newTextLen: new_text.length,
+          newTextPreview: new_text.slice(0, 80),
+        },
+        `[Audit] edit_message → ${chat_jid} / ${message_id}`,
+      );
+
+      if (!connection || !connection.sock) {
+        mcpLogger.error(
+          "[MCP Tool Error] edit_message failed: WhatsApp connection is not active.",
+        );
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: "Error: WhatsApp connection is not active or reconnecting." },
+          ],
+        };
+      }
+
+      // Validate that the message exists and belongs to us
+      const existing = getMessageById(message_id);
+      if (!existing) {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Message with ID "${message_id}" not found in local database.` },
+          ],
+        };
+      }
+      if (!existing.is_from_me) {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Message "${message_id}" was not sent by you. Only your own messages can be edited.` },
+          ],
+        };
+      }
+
+      // Use the chat_jid from the DB as ground truth (in case the caller's differs)
+      const resolvedChatJid = existing.chat_jid;
+
+      try {
+        const success = await editWhatsAppMessage(
+          waLogger,
+          connection,
+          resolvedChatJid,
+          message_id,
+          new_text,
+        );
+
+        if (success) {
+          // Keep local DB in sync so subsequent list_messages reflects the edit
+          updateMessageContent(message_id, resolvedChatJid, new_text);
+          mcpLogger.info(
+            { audit: "edit_message_success", message_id, chat_jid: resolvedChatJid },
+            `[Audit] edit_message OK`,
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  success: true,
+                  message_id,
+                  chat_jid: resolvedChatJid,
+                  new_text,
+                }, null, 2),
+              },
+            ],
+          };
+        } else {
+          return {
+            isError: true,
+            content: [
+              { type: "text", text: `Failed to edit message "${message_id}". See server logs for details.` },
+            ],
+          };
+        }
+      } catch (error: any) {
+        mcpLogger.error(
+          `[MCP Tool Error] edit_message failed for ${message_id}: ${error.message}`,
+        );
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Error editing message: ${error.message}` },
           ],
         };
       }
