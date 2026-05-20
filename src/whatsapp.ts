@@ -5,7 +5,7 @@ import {
   makeCacheableSignalKeyStore,
   DisconnectReason,
   type WAMessage,
-  type proto,
+  proto,
   isJidGroup,
   jidNormalizedUser,
 } from "@whiskeysockets/baileys";
@@ -611,14 +611,20 @@ export async function editWhatsAppMessage(
       { chatJid: normalizedJid, messageId },
       `Editing message: ${newText.substring(0, 50)}...`
     );
-    await sock.sendMessage(normalizedJid, {
-      text: newText,
-      edit: {
-        remoteJid: normalizedJid,
-        id: messageId,
-        fromMe: true,
+    const msgKey = {
+      remoteJid: normalizedJid,
+      id: messageId,
+      fromMe: true,
+    };
+    await sock.relayMessage(normalizedJid, {
+      protocolMessage: {
+        key: msgKey,
+        type: proto.Message.ProtocolMessage.Type.MESSAGE_EDIT,
+        editedMessage: {
+          conversation: newText,
+        },
       },
-    });
+    }, {});
     logger.info({ chatJid: normalizedJid, messageId }, "Message edited successfully");
     return true;
   } catch (error) {
