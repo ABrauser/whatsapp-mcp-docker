@@ -26,3 +26,14 @@ export function findUnwritable(
     return { path: current, code: err.code ?? String(err.message) };
   }
 }
+
+/**
+ * Files the app itself writes into the data dir: the SQLite db with its side
+ * files, and the pino-roll logs (`wa-logs.txt.<date>.<n>`, or the plain
+ * `*-logs.txt` fallback). Anything else there — e.g. a root-edited
+ * contact_overrides.json or a manual `whatsapp.db.bak` — is never written and
+ * must not block startup.
+ */
+export function isAppDataFile(name: string): boolean {
+  return /^whatsapp\.db(-wal|-shm|-journal)?$/.test(name) || /^(wa|mcp)-logs\.txt/.test(name);
+}

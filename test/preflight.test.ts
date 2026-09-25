@@ -11,7 +11,7 @@ import { strict as assert } from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { findUnwritable } from "../src/preflight.ts";
+import { findUnwritable, isAppDataFile } from "../src/preflight.ts";
 
 const isRoot = process.getuid?.() === 0;
 const isWindows = process.platform === "win32";
@@ -22,13 +22,12 @@ beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wamcp-preflight-"));
 });
 afterEach(() => {
-  // Restore perms so cleanup works on every platform. Directories need +x to
-  // be traversable, otherwise rmSync fails with EACCES on Linux.
-  try { fs.chmodSync(tmp, 0o755); } catch { /* ignore */ }
-  for (const e of fs.readdirSync(tmp, { recursive: true, withFileTypes: true })) {
-    try {
-      fs.chmodSync(path.join(e.parentPath, e.name), e.isDirectory() ? 0o755 : 0o644);
-    } catch { /* ignore */ }
+  // Undo the tests' chmods before cleanup. Directories need their x bit back or
+  // rmSync cannot descend into them on POSIX; readdir lists parents first, so
+  // every stat below can still traverse.
+  for (const entry of fs.readdirSync(tmp, { recursive: true }) as string[]) {
+    const p = path.join(tmp, entry);
+    fs.chmodSync(p, fs.statSync(p).isDirectory() ? 0o755 : 0o644);
   }
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -64,8 +63,17 @@ test("read-only files not selected by mustWrite are ignored", { skip: isRoot }, 
   fs.writeFileSync(overrides, "{}");
   fs.chmodSync(overrides, 0o444);
 
-  assert.equal(findUnwritable(tmp, (n) => n.startsWith("whatsapp.db")), null);
+  assert.equal(findUnwritable(tmp, isAppDataFile), null);
   assert.equal(findUnwritable(tmp, all)?.path, overrides);
+});
+
+test("isAppDataFile selects exactly the files the app writes in data/", () => {
+  for (const n of ["whatsapp.db", "whatsapp.db-wal", "whatsapp.db-shm", "wa-logs.txt", "wa-logs.txt.2026-09-25.1", "mcp-logs.txt.2026-09-25.3"]) {
+    assert.ok(isAppDataFile(n), `${n} should be checked`);
+  }
+  for (const n of ["contact_overrides.json", "whatsapp.db.bak", "whatsapp.db-backup", "notes.txt"]) {
+    assert.ok(!isAppDataFile(n), `${n} should be ignored`);
+  }
 });
 
 test("unwritable dir itself is reported", { skip: isRoot || isWindows }, () => {

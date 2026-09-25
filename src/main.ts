@@ -1,7 +1,7 @@
 import pino from "pino";
 import roll from "pino-roll";
 import { initializeDatabase, closeDatabase } from "./database.ts";
-import { findUnwritable } from "./preflight.ts";
+import { findUnwritable, isAppDataFile } from "./preflight.ts";
 import { startWhatsAppConnection, stopWhatsAppConnection, AUTH_DIR, type WhatsAppConnection } from "./whatsapp.ts";
 import { startMcpServer } from "./mcp.ts";
 import { initContactOverrides, closeContactOverrides } from "./contactOverrides.ts";
@@ -30,9 +30,9 @@ function assertWritable(label: string, dir: string, mustWrite: (name: string) =>
   );
   process.exit(1);
 }
-// SQLite needs the db (+ -wal/-shm) writable; other files in data/ (e.g. a
-// root-edited contact_overrides.json) are read-only inputs and may stay as is.
-assertWritable("Data", dataDir, (n) => n.startsWith("whatsapp.db"));
+// Only what the app writes (db + logs); read-only inputs such as a root-edited
+// contact_overrides.json may keep their ownership.
+assertWritable("Data", dataDir, isAppDataFile);
 // Baileys rewrites creds.json and every key/session file — all must be ours.
 assertWritable("Auth", AUTH_DIR, () => true);
 
