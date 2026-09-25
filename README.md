@@ -104,6 +104,23 @@ Path: `<data dir>/contact_overrides.json` (typically `/opt/docker/whatsapp-mcp/d
 
 ## Security
 
+- **The container runs as the unprivileged `node` user (UID/GID 1000)**, not root. Everything it writes (`/app/data`, `/app/auth_info`) must be owned by that user — the server refuses to start otherwise and prints the exact path that is not writable.
+  - *Fresh* named volumes (default `docker-compose.yml`) inherit the ownership from the image automatically.
+  - **Bind mounts** (e.g. the Portainer stack) need a one-time `chown` on the host:
+
+    ```bash
+    sudo chown -R 1000:1000 /opt/docker/whatsapp-mcp/data /opt/docker/whatsapp-mcp/auth_info
+    ```
+
+  - **Upgrading from an older (root-based) image** with *existing* data: fix ownership **before** pulling the new image, otherwise the container crash-loops on start (your session stays intact, it just cannot be written). Bind mounts: command above. Named volumes:
+
+    ```bash
+    docker compose down
+    docker run --rm -v whatsapp-mcp-docker_whatsapp_data:/d -v whatsapp-mcp-docker_whatsapp_auth:/a alpine chown -R 1000:1000 /d /a
+    docker compose pull && docker compose up -d
+    ```
+
+    (Volume names are `<project>_whatsapp_data` / `<project>_whatsapp_auth`; check with `docker volume ls`.)
 - **Always set `MCP_AUTH_TOKEN`** unless you bind the container to `127.0.0.1` only. Without a token, anyone on your network can read your chats and send messages from your account.
 - Without TLS, the token is sent in plaintext. For LAN-only deployments this is usually acceptable; for anything wider, terminate TLS in a reverse proxy (Caddy, Traefik, nginx).
 - Logs in `/app/data/wa-logs.txt` and `/app/data/mcp-logs.txt` may contain message snippets. Treat the data volume as sensitive.
@@ -158,9 +175,17 @@ node --experimental-sqlite --experimental-strip-types src/main.ts
 # Type-check only
 npx tsc --noEmit
 
+# Run tests
+npm test
+
 # Build Docker image locally
 docker build -t whatsapp-mcp-docker .
 ```
+
+### Dependency notes
+
+- `@whiskeysockets/baileys` 6.x pulls `libsignal` from git, which pins a `protobufjs` 6.x with critical advisories. `package.json` `overrides` lifts it to the patched 7.x runtime. `test/libsignalRoundtrip.test.ts` performs a full Signal handshake + encrypt/decrypt through that override so a breaking protobufjs change fails in CI instead of surfacing as `Bad MAC` in production.
+- Run `npm audit` after any dependency change; the Docker image is built with `npm ci` from the committed lockfile, so a rebuild alone never picks up dependency fixes.
 
 ## Architecture
 

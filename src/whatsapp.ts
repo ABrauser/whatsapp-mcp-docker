@@ -62,7 +62,7 @@ function extractLidAlias(
   return null;
 }
 
-const AUTH_DIR = process.env.WHATSAPP_AUTH_DIR
+export const AUTH_DIR = process.env.WHATSAPP_AUTH_DIR
   ? path.resolve(process.env.WHATSAPP_AUTH_DIR)
   : path.join(import.meta.dirname, "..", "auth_info");
 

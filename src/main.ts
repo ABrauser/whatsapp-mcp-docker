@@ -1,8 +1,8 @@
 import pino from "pino";
 import roll from "pino-roll";
-import fs from "node:fs";
 import { initializeDatabase, closeDatabase } from "./database.ts";
-import { startWhatsAppConnection, stopWhatsAppConnection, type WhatsAppConnection } from "./whatsapp.ts";
+import { findUnwritable } from "./preflight.ts";
+import { startWhatsAppConnection, stopWhatsAppConnection, AUTH_DIR, type WhatsAppConnection } from "./whatsapp.ts";
 import { startMcpServer } from "./mcp.ts";
 import { initContactOverrides, closeContactOverrides } from "./contactOverrides.ts";
 import { type Server } from "node:http";
@@ -14,7 +14,27 @@ if (!Number.isFinite(port) || port < 1 || port > 65535) {
   process.exit(1);
 }
 const dataDir = process.env.WHATSAPP_MCP_DATA_DIR || ".";
-fs.mkdirSync(dataDir, { recursive: true });
+
+// The container runs as the unprivileged `node` user. If a bind mount is still
+// root-owned, Baileys would silently fail to persist Signal key updates and
+// sessions would desync over time ("Bad MAC") — so refuse to start instead.
+// Must run before the loggers open files in dataDir.
+function assertWritable(label: string, dir: string, mustWrite: (name: string) => boolean): void {
+  const bad = findUnwritable(dir, mustWrite);
+  if (!bad) return;
+  const uid = process.getuid?.() ?? "?";
+  console.error(
+    `❌ ${label} path is not writable: ${bad.path} (${bad.code})\n` +
+      `   Process runs as UID ${uid}. Fix ownership of the host path mounted there, e.g.:\n` +
+      `   sudo chown -R 1000:1000 /opt/docker/whatsapp-mcp/data /opt/docker/whatsapp-mcp/auth_info`,
+  );
+  process.exit(1);
+}
+// SQLite needs the db (+ -wal/-shm) writable; other files in data/ (e.g. a
+// root-edited contact_overrides.json) are read-only inputs and may stay as is.
+assertWritable("Data", dataDir, (n) => n.startsWith("whatsapp.db"));
+// Baileys rewrites creds.json and every key/session file — all must be ours.
+assertWritable("Auth", AUTH_DIR, () => true);
 
 // Rotated log files: 10 MB max per chunk, daily new file, retain 7 days.
 // Falls back to a plain destination if pino-roll fails (e.g. read-only FS).

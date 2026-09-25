@@ -1,6 +1,11 @@
 ## Portainer Stack - WhatsApp MCP Server
 ## Deploy this file as a stack in Portainer.
 ## Image: ghcr.io/abrauser/whatsapp-mcp-docker:latest
+##
+## The container runs as UID/GID 1000 (`node`). The bind-mounted host paths
+## below MUST be owned by that user, otherwise the server refuses to start:
+##   sudo mkdir -p /opt/docker/whatsapp-mcp/{data,auth_info}
+##   sudo chown -R 1000:1000 /opt/docker/whatsapp-mcp
 
 services:
   whatsapp-mcp:

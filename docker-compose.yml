@@ -15,6 +15,8 @@ services:
       # Read from .env (do NOT hardcode here):
       - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
       - TZ=${TZ:-Europe/Berlin}
+    # Named volumes inherit UID/GID 1000 (`node`) from the image. If you switch
+    # to bind mounts, `chown -R 1000:1000` the host paths first.
     volumes:
       - whatsapp_data:/app/data
       - whatsapp_auth:/app/auth_info
