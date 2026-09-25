@@ -104,19 +104,21 @@ Path: `<data dir>/contact_overrides.json` (typically `/opt/docker/whatsapp-mcp/d
 
 ## Security
 
-- **The container runs as the unprivileged `node` user (UID/GID 1000)**, not root. Everything it writes (`/app/data`, `/app/auth_info`) must be owned by that user — the server refuses to start otherwise and prints the exact path that is not writable.
+- **The container runs as the unprivileged `node` user (UID 1000)**, not root. Everything it writes (`/app/data`, `/app/auth_info`) must be *owned* by UID 1000 — the server refuses to start otherwise and prints the exact path that is not writable.
   - *Fresh* named volumes (default `docker-compose.yml`) inherit the ownership from the image automatically.
-  - **Bind mounts** (e.g. the Portainer stack) need a one-time `chown` on the host:
+  - **Bind mounts** (e.g. the Portainer stack) need a one-time owner change on the host. Change the owner only — the group (and any setgid/shared-group scheme you may use under `/opt/docker`) stays as it is:
 
     ```bash
-    sudo chown -R 1000:1000 /opt/docker/whatsapp-mcp/data /opt/docker/whatsapp-mcp/auth_info
+    sudo chown -R 1000 /opt/docker/whatsapp-mcp/data /opt/docker/whatsapp-mcp/auth_info
     ```
+
+    If your host user already has UID 1000, this simply makes the data yours (e.g. `contact_overrides.json` becomes editable without `sudo`). If the container must run as a different UID, set `user: "<uid>:<gid>"` in the compose file instead — the startup check only cares about writability, not the specific UID.
 
   - **Upgrading from an older (root-based) image** with *existing* data: fix ownership **before** pulling the new image, otherwise the container crash-loops on start (your session stays intact, it just cannot be written). Bind mounts: command above. Named volumes:
 
     ```bash
     docker compose down
-    docker run --rm -v whatsapp-mcp-docker_whatsapp_data:/d -v whatsapp-mcp-docker_whatsapp_auth:/a alpine chown -R 1000:1000 /d /a
+    docker run --rm -v whatsapp-mcp-docker_whatsapp_data:/d -v whatsapp-mcp-docker_whatsapp_auth:/a alpine chown -R 1000 /d /a
     docker compose pull && docker compose up -d
     ```
 

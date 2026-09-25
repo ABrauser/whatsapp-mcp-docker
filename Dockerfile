@@ -30,9 +30,9 @@ ENV LOG_LEVEL=info
 
 EXPOSE 3010
 
-# Drop root: `node` is the unprivileged user (UID/GID 1000) shipped with the
-# base image. Bind mounts on the host must be owned by 1000:1000 — main.ts
-# verifies this at startup and fails fast with instructions otherwise.
+# Drop root: `node` is the unprivileged user (UID 1000) shipped with the base
+# image. Bind mounts on the host must be owned by UID 1000 — main.ts verifies
+# this at startup and fails fast with instructions otherwise.
 USER node
 
 # Node 24+: node:sqlite is stable, type-stripping is on by default for .ts entry.

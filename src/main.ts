@@ -22,11 +22,11 @@ const dataDir = process.env.WHATSAPP_MCP_DATA_DIR || ".";
 function assertWritable(label: string, dir: string, mustWrite: (name: string) => boolean): void {
   const bad = findUnwritable(dir, mustWrite);
   if (!bad) return;
-  const uid = process.getuid?.() ?? "?";
+  const uid = process.getuid?.() ?? 1000; // getuid is unavailable on Windows (dev only)
   console.error(
     `❌ ${label} path is not writable: ${bad.path} (${bad.code})\n` +
-      `   Process runs as UID ${uid}. Fix ownership of the host path mounted there, e.g.:\n` +
-      `   sudo chown -R 1000:1000 /opt/docker/whatsapp-mcp/data /opt/docker/whatsapp-mcp/auth_info`,
+      `   Process runs as UID ${uid}. Make that UID the owner of the host path mounted there (group is left untouched), e.g.:\n` +
+      `   sudo chown -R ${uid} /opt/docker/whatsapp-mcp/data /opt/docker/whatsapp-mcp/auth_info`,
   );
   process.exit(1);
 }

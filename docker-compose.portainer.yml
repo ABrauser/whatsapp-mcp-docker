@@ -2,10 +2,11 @@
 ## Deploy this file as a stack in Portainer.
 ## Image: ghcr.io/abrauser/whatsapp-mcp-docker:latest
 ##
-## The container runs as UID/GID 1000 (`node`). The bind-mounted host paths
-## below MUST be owned by that user, otherwise the server refuses to start:
+## The container runs as UID 1000 (`node`). The bind-mounted host paths below
+## MUST be owned by that UID, otherwise the server refuses to start. Change the
+## owner only so an existing group/setgid scheme on the host stays intact:
 ##   sudo mkdir -p /opt/docker/whatsapp-mcp/{data,auth_info}
-##   sudo chown -R 1000:1000 /opt/docker/whatsapp-mcp
+##   sudo chown -R 1000 /opt/docker/whatsapp-mcp/data /opt/docker/whatsapp-mcp/auth_info
 
 services:
   whatsapp-mcp:
