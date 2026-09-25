@@ -22,11 +22,14 @@ beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wamcp-preflight-"));
 });
 afterEach(() => {
-  // Restore perms so cleanup works on every platform.
-  for (const entry of fs.readdirSync(tmp, { recursive: true }) as string[]) {
-    try { fs.chmodSync(path.join(tmp, entry), 0o644); } catch { /* ignore */ }
-  }
+  // Restore perms so cleanup works on every platform. Directories need +x to
+  // be traversable, otherwise rmSync fails with EACCES on Linux.
   try { fs.chmodSync(tmp, 0o755); } catch { /* ignore */ }
+  for (const e of fs.readdirSync(tmp, { recursive: true, withFileTypes: true })) {
+    try {
+      fs.chmodSync(path.join(e.parentPath, e.name), e.isDirectory() ? 0o755 : 0o644);
+    } catch { /* ignore */ }
+  }
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
