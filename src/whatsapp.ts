@@ -5,9 +5,13 @@ import {
   makeCacheableSignalKeyStore,
   DisconnectReason,
   type WAMessage,
+  type WAMessageKey,
+  type GroupMetadata,
   proto,
   isJidGroup,
   jidNormalizedUser,
+  jidDecode,
+  USyncQuery,
 } from "@whiskeysockets/baileys";
 import P from "pino";
 import path from "node:path";
@@ -21,8 +25,146 @@ import {
   storeLidAlias,
   debugLidMapping,
   scheduleLidMigration,
+  getMessageById,
   type Message as DbMessage,
 } from "./database.ts";
+
+// --- Sent-message cache & retry resolution (getMessage) -------------
+// When recipients (especially in @lid groups) cannot decrypt a message with
+// their cached SenderKey, their WhatsApp client sends a retry receipt. Baileys
+// invokes `getMessage(key)` from `makeWASocket` to fetch the original
+// `proto.IMessage` payload and re-encrypt it. Without `getMessage`, retries
+// silently drop and the message stays at a single checkmark.
+const MAX_SENT_MESSAGES_CACHE = 500;
+const sentMessagesCache = new Map<string, proto.IMessage>();
+
+export function cacheSentMessage(
+  messageId: string | null | undefined,
+  message: proto.IMessage | null | undefined,
+): void {
+  if (!messageId || !message) return;
+  if (sentMessagesCache.has(messageId)) {
+    sentMessagesCache.delete(messageId);
+  } else if (sentMessagesCache.size >= MAX_SENT_MESSAGES_CACHE) {
+    const oldestKey = sentMessagesCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      sentMessagesCache.delete(oldestKey);
+    }
+  }
+  sentMessagesCache.set(messageId, message);
+}
+
+export function clearSentMessagesCache(): void {
+  sentMessagesCache.clear();
+}
+
+export async function resolveMessageForRetry(
+  key: WAMessageKey,
+  logger?: P.Logger,
+): Promise<proto.IMessage | undefined> {
+  const id = key?.id;
+  if (!id) return undefined;
+
+  const cached = sentMessagesCache.get(id);
+  if (cached) {
+    logger?.info({ msgId: id, remoteJid: key.remoteJid, source: "memory" }, "Resolved message for retry request");
+    return cached;
+  }
+
+  const dbMsg = getMessageById(id);
+  if (dbMsg?.content) {
+    logger?.info({ msgId: id, remoteJid: key.remoteJid, source: "sqlite" }, "Resolved message for retry request");
+    return { conversation: dbMsg.content };
+  }
+
+  logger?.warn({ msgId: id, remoteJid: key.remoteJid }, "Retry requested for unknown message ID");
+  return undefined;
+}
+
+// --- Group metadata cache & Baileys 6.7.x @lid group workarounds ----
+const groupMetadataCache = new Map<string, GroupMetadata>();
+
+export function getCachedGroupMetadata(jid: string): GroupMetadata | undefined {
+  return groupMetadataCache.get(jid);
+}
+
+export function setCachedGroupMetadata(jid: string, meta: GroupMetadata): void {
+  groupMetadataCache.set(jid, meta);
+}
+
+/**
+ * Baileys 6.7.x always passes `creds.me.id` (`<phone>:<device>@s.whatsapp.net`)
+ * to `signalRepository.encryptGroupMessage`, even in `@lid` groups where
+ * WhatsApp's server stamps the stanza with `participant="<lid>:<device>@lid"`
+ * and `addressing_mode="lid"`. Recipients then look up the SenderKey under our
+ * `@lid` identity and fail decryption if it was keyed under our `@s` identity.
+ */
+export function selectGroupSenderIdentity(opts: {
+  addressingMode?: string | null;
+  meId: string;
+  meLid?: string | null;
+}): string {
+  const mode = opts.addressingMode ?? "lid";
+  if (mode === "lid" && opts.meLid) {
+    return opts.meLid;
+  }
+  return opts.meId;
+}
+
+/**
+ * Baileys 6.7.x `extractDeviceJids` only compares `userResult.id` against
+ * `creds.me.id` (phone number), not `creds.me.lid`. When querying participant
+ * devices for a `@lid` group, our own `@lid` entry is in the USync response and
+ * Baileys mistakenly includes our own companion device in the recipient list.
+ * This helper strips our own `(myLidUser, myDevice)` entry while preserving our
+ * primary phone (`device === 0`) and other companion devices (e.g. desktop).
+ */
+export function filterOwnLidDeviceFromUSyncList<
+  T extends { id?: string; devices?: { deviceList?: Array<{ id: number }> } }
+>(
+  list: T[] | undefined,
+  meId: string | undefined | null,
+  meLid: string | undefined | null,
+): T[] | undefined {
+  if (!Array.isArray(list) || !meLid) return list;
+  const decodedLid = jidDecode(meLid);
+  const decodedMe = meId ? jidDecode(meId) : undefined;
+  const myLidUser = decodedLid?.user;
+  const myDevice = decodedLid?.device ?? decodedMe?.device;
+  if (!myLidUser || myDevice === undefined) return list;
+
+  return list.map((item) => {
+    if (!item?.id || !Array.isArray(item.devices?.deviceList)) return item;
+    const itemDecoded = jidDecode(item.id);
+    if (itemDecoded?.user !== myLidUser) return item;
+    return {
+      ...item,
+      devices: {
+        ...item.devices,
+        deviceList: item.devices.deviceList.filter((d) => d.id !== myDevice),
+      },
+    };
+  });
+}
+
+let activeMeIdentity: { id?: string; lid?: string } = {};
+let usyncPatched = false;
+function ensureUSyncLidPatchInstalled(): void {
+  if (usyncPatched) return;
+  usyncPatched = true;
+  const origParse = USyncQuery.prototype.parseUSyncQueryResult;
+  USyncQuery.prototype.parseUSyncQueryResult = function (result: any) {
+    const parsed = origParse.call(this, result);
+    if (parsed && Array.isArray(parsed.list)) {
+      parsed.list = filterOwnLidDeviceFromUSyncList(
+        parsed.list,
+        activeMeIdentity.id,
+        activeMeIdentity.lid,
+      ) as any;
+    }
+    return parsed;
+  };
+}
 
 /**
  * Extract a deterministic @lid ↔ @s.whatsapp.net mapping from a Baileys
@@ -157,6 +299,7 @@ function parseMessageForDb(msg: WAMessage): DbMessage | null {
 
 export interface WhatsAppConnection {
   sock: WhatsAppSocket | null;
+  keys?: ReturnType<typeof makeCacheableSignalKeyStore>;
 }
 
 let isShuttingDown = false;
@@ -188,6 +331,7 @@ export async function startWhatsAppConnection(
       holder.sock.ev.removeAllListeners("contacts.update");
       holder.sock.ev.removeAllListeners("groups.upsert");
       holder.sock.ev.removeAllListeners("groups.update");
+      holder.sock.ev.removeAllListeners("group-participants.update");
       holder.sock.ev.removeAllListeners("creds.update");
       holder.sock.end(undefined);
     } catch { /* ignore */ }
@@ -198,15 +342,41 @@ export async function startWhatsAppConnection(
   const { version, isLatest } = await fetchLatestBaileysVersion();
   logger.info(`Using WA v${version.join(".")}, isLatest: ${isLatest}`);
 
+  ensureUSyncLidPatchInstalled();
+  activeMeIdentity = {
+    id: state.creds.me?.id,
+    lid: state.creds.me?.lid,
+  };
+
+  const cachedKeys = makeCacheableSignalKeyStore(state.keys, logger);
+  holder.keys = cachedKeys;
+
   const sock = makeWASocket({
     version,
     logger,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger),
+      keys: cachedKeys,
     },
     generateHighQualityLinkPreview: true,
+    getMessage: async (key) => resolveMessageForRetry(key, logger),
+    cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid),
   });
+
+  // Patch signalRepository.encryptGroupMessage so @lid groups use creds.me.lid
+  // instead of creds.me.id as the SenderKey author identity.
+  const origEncryptGroupMessage = sock.signalRepository.encryptGroupMessage.bind(
+    sock.signalRepository,
+  );
+  sock.signalRepository.encryptGroupMessage = async (opts) => {
+    const groupMeta = groupMetadataCache.get(opts.group);
+    const effectiveMeId = selectGroupSenderIdentity({
+      addressingMode: (groupMeta as any)?.addressingMode ?? "lid",
+      meId: opts.meId,
+      meLid: state.creds.me?.lid,
+    });
+    return origEncryptGroupMessage({ ...opts, meId: effectiveMeId });
+  };
 
   // Update the holder with the new socket
   holder.sock = sock;
@@ -285,6 +455,7 @@ export async function startWhatsAppConnection(
               const allGroups = await sock.groupFetchAllParticipating();
               let resolved = 0;
               for (const [jid, meta] of Object.entries(allGroups)) {
+                groupMetadataCache.set(jid, meta);
                 if (meta.subject) {
                   storeChat({ jid, name: meta.subject });
                   resolved++;
@@ -304,6 +475,10 @@ export async function startWhatsAppConnection(
     }
 
     if (events["creds.update"]) {
+      activeMeIdentity = {
+        id: state.creds.me?.id,
+        lid: state.creds.me?.lid,
+      };
       await saveCreds();
       logger.info("Credentials saved.");
     }
@@ -393,6 +568,9 @@ export async function startWhatsAppConnection(
 
       if (type === "notify" || type === "append") {
         for (const msg of messages) {
+          if (msg.key?.fromMe && msg.key?.id && msg.message) {
+            cacheSentMessage(msg.key.id, msg.message);
+          }
           // ── Capture deterministic @lid ↔ @s mapping from the envelope ────
           // WhatsApp ships both identifiers in every group message key.
           // Persisting the pair lets contacts_resolved deterministically link
@@ -479,6 +657,9 @@ export async function startWhatsAppConnection(
     // ─── Group name sync events ─────────────────────────────────────
     if (events["groups.upsert"]) {
       for (const group of events["groups.upsert"]) {
+        if (group.id) {
+          groupMetadataCache.set(group.id, group);
+        }
         if (group.id && group.subject) {
           storeChat({ jid: group.id, name: group.subject });
           logger.info(`[Group] Upserted name: "${group.subject}" for ${group.id}`);
@@ -488,10 +669,20 @@ export async function startWhatsAppConnection(
 
     if (events["groups.update"]) {
       for (const update of events["groups.update"]) {
+        if (update.id) {
+          groupMetadataCache.delete(update.id);
+        }
         if (update.id && update.subject) {
           storeChat({ jid: update.id, name: update.subject });
           logger.info(`[Group] Updated name: "${update.subject}" for ${update.id}`);
         }
+      }
+    }
+
+    if (events["group-participants.update"]) {
+      const update = events["group-participants.update"];
+      if (update?.id) {
+        groupMetadataCache.delete(update.id);
       }
     }
   });
@@ -532,6 +723,7 @@ export function scheduleLazyGroupNameFetch(
       const all = await sock.groupFetchAllParticipating();
       let updated = 0;
       for (const [jid, meta] of Object.entries(all)) {
+        groupMetadataCache.set(jid, meta);
         if (meta.subject) {
           storeChat({ jid, name: meta.subject });
           updated++;
@@ -546,6 +738,55 @@ export function scheduleLazyGroupNameFetch(
       lazyGroupFetchInflight = false;
     }
   }, delayMs);
+}
+
+/**
+ * Ensure group metadata is cached and, for @lid groups migrating from the old
+ * phone-number SenderKey (`<group>::<phone>::<device>`) to the @lid SenderKey
+ * (`<group>::<lid>::<device>`), reset `sender-key-memory` once so Baileys
+ * distributes the new `senderKeyDistributionMessage` to all participants.
+ */
+async function prepareGroupForSend(
+  sock: WhatsAppSocket,
+  holder: WhatsAppConnection,
+  groupJid: string,
+  logger: P.Logger,
+): Promise<void> {
+  if (!isJidGroup(groupJid)) return;
+
+  let meta = groupMetadataCache.get(groupJid);
+  if (!meta) {
+    try {
+      meta = await sock.groupMetadata(groupJid);
+      if (meta) {
+        groupMetadataCache.set(groupJid, meta);
+      }
+    } catch (err) {
+      logger.warn({ err, groupJid }, "Failed to prefetch group metadata before send");
+    }
+  }
+
+  const meLid = sock.authState?.creds?.me?.lid;
+  const keys = holder.keys ?? sock.authState?.keys;
+  const addressingMode = (meta as any)?.addressingMode ?? "lid";
+  if (addressingMode === "lid" && meLid && keys) {
+    const decoded = jidDecode(meLid);
+    if (decoded?.user) {
+      const lidSenderKeyName = `${groupJid}::${decoded.user}::${decoded.device || 0}`;
+      const existing = await keys.get("sender-key", [lidSenderKeyName]);
+      if (!existing[lidSenderKeyName]) {
+        logger.info(
+          { groupJid, lidSenderKeyName },
+          "Initializing @lid SenderKey for group; resetting sender-key-memory to force key distribution",
+        );
+        const selfSessionKey = `${decoded.user}.${decoded.device || 0}`;
+        await keys.set({
+          "sender-key-memory": { [groupJid]: null },
+          session: { [selfSessionKey]: null },
+        });
+      }
+    }
+  }
 }
 
 export async function sendWhatsAppMessage(
@@ -575,7 +816,11 @@ export async function sendWhatsAppMessage(
       `Sending message to ${recipientJid}: ${text.substring(0, 50)}...`
     );
     const normalizedJid = jidNormalizedUser(recipientJid);
+    await prepareGroupForSend(sock, holder, normalizedJid, logger);
     const result = await sock.sendMessage(normalizedJid, { text: text });
+    if (result?.key?.id && result.message) {
+      cacheSentMessage(result.key.id, result.message);
+    }
     logger.info({ msgId: result?.key.id }, "Message sent successfully");
     return result;
   } catch (error) {
@@ -607,6 +852,7 @@ export async function editWhatsAppMessage(
 
   try {
     const normalizedJid = jidNormalizedUser(chatJid);
+    await prepareGroupForSend(sock, holder, normalizedJid, logger);
     logger.info(
       { chatJid: normalizedJid, messageId },
       `Editing message: ${newText.substring(0, 50)}...`
@@ -616,7 +862,7 @@ export async function editWhatsAppMessage(
       id: messageId,
       fromMe: true,
     };
-    await sock.relayMessage(normalizedJid, {
+    const editPayload: proto.IMessage = {
       protocolMessage: {
         key: msgKey,
         type: proto.Message.ProtocolMessage.Type.MESSAGE_EDIT,
@@ -624,7 +870,9 @@ export async function editWhatsAppMessage(
           conversation: newText,
         },
       },
-    }, {});
+    };
+    await sock.relayMessage(normalizedJid, editPayload, {});
+    cacheSentMessage(messageId, { conversation: newText });
     logger.info({ chatJid: normalizedJid, messageId }, "Message edited successfully");
     return true;
   } catch (error) {
