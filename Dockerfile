@@ -23,12 +23,13 @@ COPY src ./src
 RUN mkdir -p /app/data /app/auth_info && chown -R node:node /app/data /app/auth_info
 
 ENV MCP_PORT=3010
+ENV MCP_ADMIN_PORT=3011
 ENV WHATSAPP_MCP_DATA_DIR=/app/data
 ENV WHATSAPP_AUTH_DIR=/app/auth_info
 ENV LOG_LEVEL=info
-# MCP_AUTH_TOKEN intentionally unset — must be provided at runtime.
+# MCP_AUTH_TOKEN and MCP_ADMIN_PASSWORD intentionally unset — set at runtime.
 
-EXPOSE 3010
+EXPOSE 3010 3011
 
 # Drop root: `node` is the unprivileged user (UID 1000) shipped with the base
 # image. Bind mounts on the host must be owned by UID 1000 — main.ts verifies

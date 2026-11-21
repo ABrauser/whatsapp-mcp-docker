@@ -15,16 +15,24 @@ services:
     restart: unless-stopped
     ports:
       - "3010:3010"
+      # Admin Web UI (restrict to 127.0.0.1:3011:3011 or your admin subnet if preferred):
+      - "3011:3011"
     environment:
       - MCP_PORT=3010
-      - TZ=Europe/Berlin
+      - MCP_ADMIN_PORT=3011
       - LOG_LEVEL=info
-      - WHATSAPP_DEBUG=true
+      # - WHATSAPP_DEBUG=true
       - WHATSAPP_MCP_DATA_DIR=/app/data
       - WHATSAPP_AUTH_DIR=/app/auth_info
-      # Set this in Portainer's stack environment UI. Leave empty ONLY if the
-      # container is reachable only from trusted hosts (e.g. localhost).
+      # Set MCP_ADMIN_PASSWORD in Portainer's stack environment UI to enable the Admin UI on port 3011.
+      - MCP_ADMIN_PASSWORD=${MCP_ADMIN_PASSWORD:-}
+      # Optional legacy full-access token (for existing clients during migration to scoped UI tokens):
       - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
+      - TZ=Europe/Berlin
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - /opt/docker/whatsapp-mcp/data:/app/data
       - /opt/docker/whatsapp-mcp/auth_info:/app/auth_info

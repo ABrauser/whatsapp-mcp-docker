@@ -15,6 +15,7 @@ import {
 } from "@whiskeysockets/baileys";
 import P from "pino";
 import path from "node:path";
+import { renderUnicodeCompact } from "uqr";
 
 import {
   initializeDatabase,
@@ -300,6 +301,7 @@ function parseMessageForDb(msg: WAMessage): DbMessage | null {
 export interface WhatsAppConnection {
   sock: WhatsAppSocket | null;
   keys?: ReturnType<typeof makeCacheableSignalKeyStore>;
+  latestQr: string | null;
 }
 
 let isShuttingDown = false;
@@ -318,7 +320,7 @@ export async function startWhatsAppConnection(
     debugLidMapping(logger);
   }
 
-  const holder: WhatsAppConnection = connectionHolder || { sock: null };
+  const holder: WhatsAppConnection = connectionHolder || { sock: null, latestQr: null };
 
   // Tear down previous socket if any (reconnect path)
   if (holder.sock) {
@@ -358,7 +360,8 @@ export async function startWhatsAppConnection(
       creds: state.creds,
       keys: cachedKeys,
     },
-    generateHighQualityLinkPreview: true,
+    // Disabled to avoid outbound SSRF fetches when sending messages with URLs.
+    generateHighQualityLinkPreview: false,
     getMessage: async (key) => resolveMessageForRetry(key, logger),
     cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid),
   });
@@ -387,22 +390,23 @@ export async function startWhatsAppConnection(
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        const qrUrl = `https://quickchart.io/qr?text=${encodeURIComponent(qr)}&size=300`;
-        // Raw QR data is sensitive (full session-pairing key valid for ~20s).
-        // Keep it at debug so it's not in the default log file.
-        logger.debug({ qrCodeData: qr }, "QR Code received.");
-        logger.info("QR Code received. Scan with your WhatsApp app via the URL printed below.");
-        // Log the QR URL prominently so it's visible in docker logs
+        holder.latestQr = qr;
+        const adminPort = process.env.MCP_ADMIN_PORT || "3011";
+        logger.info("QR Code received. Scan via Admin UI or terminal output.");
         console.log("\n╔══════════════════════════════════════════════════════╗");
         console.log("║          SCAN QR CODE WITH WHATSAPP                 ║");
         console.log("╠══════════════════════════════════════════════════════╣");
-        console.log(`║  Open this URL in your browser:                     ║`);
-        console.log(`║  ${qrUrl}`);
-        console.log("╚══════════════════════════════════════════════════════╝\n");
+        if (adminPort !== "0" && adminPort !== "disabled") {
+          console.log(`║  Or open the local Admin UI on port ${adminPort}            ║`);
+        }
+        console.log("╚══════════════════════════════════════════════════════╝");
+        console.log(renderUnicodeCompact(qr));
+        console.log("");
       }
 
       if (connection === "close") {
         holder.sock = null;
+        holder.latestQr = null;
         const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
         logger.warn(
           { error: lastDisconnect?.error },
@@ -440,6 +444,7 @@ export async function startWhatsAppConnection(
           }
         }
       } else if (connection === "open") {
+        holder.latestQr = null;
         reconnectAttempts = 0; // Reset attempts on successful connection
         logger.info(`Connection opened. WA user: ${sock.user?.name}`);
         console.log(`\n✅ WhatsApp connected as: ${sock.user?.name}\n`);

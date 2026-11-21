@@ -4,11 +4,13 @@ A WhatsApp MCP (Model Context Protocol) server that runs as a Docker container a
 
 ## Features
 
-- **8 MCP Tools**: search_contacts, list_messages, list_recent_messages, list_chats, get_chat, get_message_context, send_message, search_messages
-- **Docker-first**: Runs as a container, accessible via IP
-- **Streamable HTTP Transport**: stateless MCP over HTTP POST
-- **Bearer-token auth** for `/sse` (set `MCP_AUTH_TOKEN`)
-- **Persistent Data**: SQLite DB (WAL + FTS5 search) and WhatsApp auth in Docker volumes
+- **9 MCP Tools**: `search_contacts`, `list_messages`, `list_recent_messages`, `list_chats`, `get_chat`, `get_message_context`, `send_message`, `edit_message`, `search_messages`
+- **Admin Web UI (Port 3011)**: Built-in token manager, audit log viewer, global send kill-switch, and local QR code pairing
+- **Scoped Multi-Token Auth**: Per-agent Bearer tokens (`wamcp_…`) with 1-click presets, tool filtering (`tools/list`), chat allowlists, expiry (TTL), and per-token rate/send caps
+- **Backwards-Compatible Migration**: Optional legacy `MCP_AUTH_TOKEN` continues working until disabled in the UI or env
+- **Docker-first**: Runs as a non-root container (`node`, UID 1000), accessible via LAN IP
+- **Streamable HTTP Transport**: Stateless MCP over HTTP POST (`/sse`)
+- **Persistent Data**: SQLite DB (WAL + FTS5 search + tokens/audit) and WhatsApp auth in Docker volumes
 - **Health Check**: `/health` returns 503 when WhatsApp is disconnected
 - **Multi-Arch**: Builds for both amd64 and arm64
 
@@ -18,7 +20,9 @@ A WhatsApp MCP (Model Context Protocol) server that runs as a Docker container a
 
 ```bash
 cp .env.example .env
-# Generate a strong token and write it to .env:
+# Generate an Admin UI password and write it to .env:
+echo "MCP_ADMIN_PASSWORD=$(openssl rand -base64 24)" >> .env
+# Optional: keep a legacy full-access token for existing clients:
 echo "MCP_AUTH_TOKEN=$(openssl rand -hex 32)" >> .env
 ```
 
@@ -31,13 +35,16 @@ docker pull ghcr.io/YOUR-USERNAME/whatsapp-mcp-docker:latest
 # Run with docker compose
 docker compose up -d
 
-# Watch logs for QR code
+# Watch logs (or open the Admin UI on port 3011)
 docker logs -f whatsapp-mcp
 ```
 
-### 3. Scan QR Code
+### 3. Scan QR Code & Create Scoped Agent Tokens
 
-On first start, a QR code URL will appear in the logs. Open it in your browser and scan with WhatsApp (Settings → Linked Devices → Link a Device).
+1. Open the Admin Web UI in your browser: `http://<YOUR-SERVER-IP>:3011/`
+2. Log in with `MCP_ADMIN_PASSWORD`.
+3. If WhatsApp is not yet linked, scan the locally rendered QR code directly in the Admin UI (or from `docker logs whatsapp-mcp`) via WhatsApp (`Settings → Linked Devices → Link a Device`).
+4. Click **"+ Neuer Agent-Token"**, pick a preset (e.g. *Read-Only*, *Read + Send (Ausgewählte Chats)*) and optional expiration, then copy the generated config snippet for your client.
 
 ### 4. Configure MCP Client
 
@@ -123,39 +130,52 @@ Path: `<data dir>/contact_overrides.json` (typically `/opt/docker/whatsapp-mcp/d
     ```
 
     (Volume names are `<project>_whatsapp_data` / `<project>_whatsapp_auth`; check with `docker volume ls`.)
-- **Always set `MCP_AUTH_TOKEN`** unless you bind the container to `127.0.0.1` only. Without a token, anyone on your network can read your chats and send messages from your account.
-- Without TLS, the token is sent in plaintext. For LAN-only deployments this is usually acceptable; for anything wider, terminate TLS in a reverse proxy (Caddy, Traefik, nginx).
-- Logs in `/app/data/wa-logs.txt` and `/app/data/mcp-logs.txt` may contain message snippets. Treat the data volume as sensitive.
-- The QR code from initial pairing is logged at `info` level once — it grants full session access for a few seconds. Don’t share that log.
+- **Fail-closed MCP Auth (`/sse`)**: `/sse` always requires a valid Bearer token (`401` otherwise). Tokens created in the Admin UI are stored as SHA-256 hashes only (never plaintext) and verified with `crypto.timingSafeEqual`.
+- **Admin UI separation (Port `3011`)**: Protected by `MCP_ADMIN_PASSWORD` (`HttpOnly; SameSite=Strict` HMAC cookie, brute-force login rate-limit, CSRF check). If `MCP_ADMIN_PASSWORD` is unset, the Admin UI API stays disabled (`503`). You can restrict port `3011` in Docker/firewall to your management host (`127.0.0.1:3011:3011` or admin subnet) while exposing port `3010` to your local AI agents.
+- **Scoped Least-Privilege & Prompt-Injection Defense**: Prefer `Read-Only` or chat-restricted tokens with short TTLs for autonomous agents. The Admin UI also provides a 1-click **Send-Kill-Switch** that immediately blocks all `send_message` / `edit_message` calls across every token.
+- **Local QR Pairing & SSRF Hardening**: Pairing QR codes are rendered locally as SVG in the Admin UI and Unicode in stdout (never sent to external URLs like `quickchart.io`), and `generateHighQualityLinkPreview` is disabled.
+- **Legacy Token Migration**: Existing `MCP_AUTH_TOKEN` clients continue working out of the box with full access until you disable the legacy token via the Admin UI or `MCP_DISABLE_LEGACY_TOKEN=true`.
+- **TLS Note**: Over a trusted LAN, direct HTTP (`http://<LAN-IP>:3010`) is typically used; for anything untrusted or internet-facing, terminate TLS via a reverse proxy (and configure `TRUST_PROXY` if needed).
+- **Sensitive Storage**: Logs in `/app/data/wa-logs.txt` and `/app/data/mcp-logs.txt` and `whatsapp.db` contain message metadata and audit records. Treat `/app/data` and `/app/auth_info` as sensitive.
 
 ## Endpoints
 
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/sse` | POST | Bearer | Streamable HTTP endpoint for MCP (stateless) |
-| `/health` | GET | none | 200 when WhatsApp connected, 503 otherwise |
+| Port | Endpoint | Method | Auth | Description |
+|------|----------|--------|------|-------------|
+| `3010` | `/sse` | POST | Bearer Token | Streamable HTTP endpoint for MCP (stateless) |
+| `3010` | `/health` | GET | none | 200 when WhatsApp connected, 503 otherwise |
+| `3011` | `/` | GET | Admin Cookie (UI) | Admin Web UI (Token Manager, Audit Log, QR Pairing) |
+| `3011` | `/api/*` | GET/POST/PATCH/DELETE | Admin Cookie + CSRF | Admin API (`503` when `MCP_ADMIN_PASSWORD` unset) |
 
 ## MCP Tools
 
 | Tool | Description |
 |------|-------------|
 | `search_contacts` | Search contacts by name or phone number |
-| `list_messages` | Get message history for a chat (paginated) |
-| `list_chats` | List chats sorted by activity or name |
+| `list_messages` | Get message history for a chat (paginated, max 200) |
+| `list_chats` | List chats sorted by activity or name (max 100) |
 | `get_chat` | Get details of a specific chat |
-| `get_message_context` | Get messages around a specific message |
-| `list_recent_messages` | Cross-chat time-window query (e.g. "last 8 hours") with optional ISO `since`/`until` |
-| `send_message` | Send a text message to a user or group |
-| `search_messages` | Full-text search across messages |
+| `get_message_context` | Get messages around a specific message (max 50 before/after) |
+| `list_recent_messages` | Cross-chat time-window query (e.g. "last 8 hours", max 500) |
+| `send_message` | Send a text message to a user or group (max 4096 chars) |
+| `edit_message` | Edit one of your own previously sent messages (max 4096 chars) |
+| `search_messages` | Full-text search across messages (max 100) |
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MCP_PORT` | `3010` | HTTP server port |
-| `MCP_AUTH_TOKEN` | _(unset)_ | Bearer token required on `/sse`. If unset, endpoint is open. |
-| `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
-| `WHATSAPP_MCP_DATA_DIR` | `/app/data` | SQLite database directory |
+| `MCP_PORT` | `3010` | HTTP port for `/sse` and `/health` |
+| `MCP_ADMIN_PORT` | `3011` | HTTP port for the Admin Web UI (`0` or `disabled` turns it off) |
+| `MCP_ADMIN_BIND` | `0.0.0.0` | Bind address for Admin Web UI |
+| `MCP_ADMIN_PASSWORD` | _(unset)_ | Password protecting the Admin Web UI (required to enable Admin API) |
+| `MCP_AUTH_TOKEN` | _(unset)_ | Optional legacy full-access Bearer token on `/sse` |
+| `MCP_DISABLE_LEGACY_TOKEN` | `false` | Set `true` to ignore `MCP_AUTH_TOKEN` even if defined |
+| `MCP_RATE_LIMIT_PER_MIN` | `120` | Per-IP rate limit on `/sse` (requests/minute) |
+| `MCP_ALLOW_UNAUTHENTICATED` | `false` | Emergency opt-in for unauthenticated `/sse` only when zero tokens exist |
+| `TRUST_PROXY` | _(unset)_ | Express `trust proxy` setting (leave unset for direct LAN HTTP) |
+| `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+| `WHATSAPP_MCP_DATA_DIR` | `/app/data` | SQLite database and logs directory |
 | `WHATSAPP_AUTH_DIR` | `/app/auth_info` | WhatsApp auth credentials directory |
 | `TZ` | `Europe/Berlin` | Timezone used for human-readable timestamps |
 | `WHATSAPP_DEBUG` | _(unset)_ | If `true`, prints @lid mapping diagnostics on startup |
@@ -192,21 +212,20 @@ docker build -t whatsapp-mcp-docker .
 ## Architecture
 
 ```
-AI Client (Gemini CLI, Claude, etc.)
-    │
-    │ HTTP POST (Streamable)
-    ▼
-┌─────────────────────┐
-│  Express Server     │  Port 3010
-│  ├── POST /sse      │  Stateless MCP
-│  └── GET /health    │  Health check
-├─────────────────────┤
-│  MCP Server         │  7 Tools
-├─────────────────────┤
-│  Baileys            │  WhatsApp Web API (Reconnects + Backoff)
-├─────────────────────┤
-│  SQLite             │  Messages & Contacts (Batch Sync)
-└─────────────────────┘
+AI Client (Gemini CLI, Claude, etc.)         Browser (Admin)
+    │ HTTP POST (Streamable + Bearer)            │ HTTP + Session Cookie
+    ▼                                            ▼
+┌─────────────────────┐                    ┌─────────────────────┐
+│  MCP Express App    │  Port 3010         │  Admin Express App  │  Port 3011
+│  ├── POST /sse      │  Scoped MCP        │  ├── GET /          │  Web UI
+│  └── GET /health    │  Health check      │  └── /api/*         │  Tokens/Audit/QR
+├─────────────────────┴────────────────────┴─────────────────────┤
+│  AuthZ & Audit (SHA-256 Tokens, Chat Allowlists, Kill-Switch)  │
+├────────────────────────────────────────────────────────────────┤
+│  MCP Server (9 Tools)     │  Baileys (WhatsApp Web, Reconnect) │
+├────────────────────────────────────────────────────────────────┤
+│  SQLite (Messages, Contacts, api_tokens, audit_logs, settings) │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ## Credits

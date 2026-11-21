@@ -1,0 +1,1379 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WhatsApp MCP — Admin &amp; Token-Manager</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --surface: #111827;
+      --surface-2: #1e293b;
+      --surface-3: #273449;
+      --border: #2b384e;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #10b981;
+      --accent-hover: #059669;
+      --accent-soft: rgba(16, 185, 129, 0.14);
+      --danger: #ef4444;
+      --danger-soft: rgba(239, 68, 68, 0.15);
+      --warn: #f59e0b;
+      --warn-soft: rgba(245, 158, 11, 0.15);
+      --info: #38bdf8;
+      --info-soft: rgba(56, 189, 248, 0.14);
+      --radius: 10px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    .hidden { display: none !important; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+    h1, h2, h3 { margin: 0 0 10px; font-weight: 600; }
+    p { margin: 0 0 12px; color: var(--muted); }
+    code, pre { font-family: var(--mono); font-size: 13px; }
+    pre {
+      background: #060a14;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      overflow-x: auto;
+      margin: 10px 0;
+      color: #cbd5e1;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* Buttons & Inputs */
+    button, .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+    }
+    button:hover:not(:disabled) { background: var(--surface-3); border-color: #475569; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); border-color: var(--accent); color: #032217; font-weight: 600; }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+    .btn-danger { background: var(--danger-soft); border-color: rgba(239, 68, 68, 0.45); color: #fca5a5; }
+    .btn-danger:hover:not(:disabled) { background: rgba(239, 68, 68, 0.25); }
+    .btn-warn { background: var(--warn-soft); border-color: rgba(245, 158, 11, 0.45); color: #fcd34d; }
+    .btn-warn:hover:not(:disabled) { background: rgba(245, 158, 11, 0.25); }
+    .btn-sm { padding: 5px 10px; font-size: 12.5px; border-radius: 6px; }
+    .btn-pill { border-radius: 999px; font-size: 12.5px; padding: 5px 12px; }
+    .btn-pill.active { background: var(--accent-soft); border-color: var(--accent); color: #6ee7b7; }
+
+    input[type="text"], input[type="password"], input[type="number"], select, textarea {
+      width: 100%;
+      background: #090e1a;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-size: 14px;
+      font-family: inherit;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
+    }
+    label.field-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: #cbd5e1;
+      margin-bottom: 6px;
+    }
+
+    /* Cards & Banners */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      margin-bottom: 16px;
+    }
+    .center-card {
+      max-width: 500px;
+      margin: 70px auto;
+    }
+    .banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      margin-bottom: 16px;
+      font-size: 14px;
+    }
+    .banner-danger {
+      background: var(--danger-soft);
+      border: 1px solid rgba(239, 68, 68, 0.45);
+      color: #fecaca;
+    }
+    .banner-warn {
+      background: var(--warn-soft);
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      color: #fde68a;
+    }
+    .banner-info {
+      background: var(--info-soft);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      color: #bae6fd;
+    }
+
+    /* Topbar */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 14px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .brand-title { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+    .topbar-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+    /* Badges */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+    .badge-ok { background: var(--accent-soft); color: #6ee7b7; border-color: rgba(16, 185, 129, 0.35); }
+    .badge-danger { background: var(--danger-soft); color: #fca5a5; border-color: rgba(239, 68, 68, 0.35); }
+    .badge-warn { background: var(--warn-soft); color: #fcd34d; border-color: rgba(245, 158, 11, 0.35); }
+    .badge-info { background: var(--info-soft); color: #7dd3fc; border-color: rgba(56, 189, 248, 0.35); }
+    .badge-muted { background: var(--surface-2); color: var(--muted); border-color: var(--border); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .dot-ok { background: var(--accent); }
+    .dot-danger { background: var(--danger); }
+
+    /* Stats Grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+    }
+    .stat-label { font-size: 12.5px; color: var(--muted); }
+    .stat-value { font-size: 26px; font-weight: 700; margin-top: 2px; }
+
+    /* QR Box */
+    .qr-panel {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .qr-svg-wrap {
+      background: #ffffff;
+      padding: 10px;
+      border-radius: 10px;
+      display: inline-flex;
+    }
+    .qr-svg-wrap svg { width: 200px; height: 200px; display: block; }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 8px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+      padding-bottom: 10px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+    .tab-group { display: flex; gap: 8px; }
+    .tab-btn {
+      background: transparent;
+      border-color: transparent;
+      color: var(--muted);
+    }
+    .tab-btn.active {
+      background: var(--surface-2);
+      border-color: var(--border);
+      color: var(--text);
+    }
+
+    /* Tables */
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13.5px;
+    }
+    th, td {
+      text-align: left;
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    tr:hover td { background: rgba(255, 255, 255, 0.02); }
+    .actions-cell { display: flex; gap: 6px; flex-wrap: wrap; }
+    .subtext { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .mono { font-family: var(--mono); font-size: 12.5px; }
+
+    /* Modal */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.78);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 50;
+      overflow-y: auto;
+    }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 680px;
+      max-height: 92vh;
+      overflow-y: auto;
+      padding: 22px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 18px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+    .form-group { margin-bottom: 15px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr; } }
+
+    .pill-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .tool-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+      gap: 8px;
+    }
+    .check-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #090e1a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 10px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .check-item input { width: auto; accent-color: var(--accent); }
+
+    .chat-picker {
+      border: 1px solid var(--border);
+      background: #090e1a;
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .chat-list {
+      max-height: 210px;
+      overflow-y: auto;
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .chat-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .chat-row:hover { background: var(--surface-2); }
+    .chat-row-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .chat-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .filter-bar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+      align-items: center;
+    }
+    .filter-bar select { width: auto; min-width: 150px; }
+    .error-msg { color: #fca5a5; font-size: 13px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <!-- Unconfigured View -->
+  <div id="view-unconfigured" class="container hidden">
+    <div class="card center-card">
+      <h2>🔐 Admin-UI noch nicht aktiviert</h2>
+      <p>
+        Aus Sicherheitsgründen startet die Verwaltungsoberfläche deaktiviert, bis
+        <code class="mono">MCP_ADMIN_PASSWORD</code> gesetzt ist.
+      </p>
+      <p>Ergänze dein <code class="mono">.env</code> oder deinen Portainer-Stack um:</p>
+      <pre>MCP_ADMIN_PASSWORD=dein-sicheres-admin-passwort
+MCP_ADMIN_PORT=3011</pre>
+      <p class="subtext">Danach Container neu starten und diese Seite neu laden.</p>
+    </div>
+  </div>
+
+  <!-- Login View -->
+  <div id="view-login" class="container hidden">
+    <div class="card center-card">
+      <h2>🔐 WhatsApp MCP Admin</h2>
+      <p>Mit deinem <code class="mono">MCP_ADMIN_PASSWORD</code> anmelden, um Agent-Tokens zu verwalten.</p>
+      <form id="login-form">
+        <div class="form-group">
+          <label class="field-label" for="login-password">Admin-Passwort</label>
+          <input id="login-password" type="password" autocomplete="current-password" required autofocus />
+        </div>
+        <button type="submit" class="btn-primary" style="width:100%; justify-content:center;">Anmelden</button>
+        <div id="login-error" class="error-msg hidden"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main Dashboard -->
+  <div id="view-app" class="hidden">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-title">WhatsApp MCP Admin</span>
+        <span id="wa-status-badge" class="badge badge-muted">
+          <span class="dot"></span> Lade…
+        </span>
+      </div>
+      <div class="topbar-actions">
+        <button id="kill-switch-btn" type="button" class="btn-warn">
+          🛡️ Senden pausieren
+        </button>
+        <button id="logout-btn" type="button">Abmelden</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <div id="kill-switch-banner" class="banner banner-danger hidden">
+        <div>
+          <strong>⚠️ Send-Kill-Switch ist AKTIV:</strong> Alle ausgehenden Nachrichten (<code class="mono">send_message</code> &amp; <code class="mono">edit_message</code>) sind für sämtliche KI-Agenten blockiert.
+        </div>
+        <button id="kill-switch-off-btn" type="button" class="btn-sm">Wieder freigeben</button>
+      </div>
+
+      <div id="legacy-banner" class="banner banner-warn hidden">
+        <div>
+          <strong>ℹ️ Legacy-Token (<code class="mono">MCP_AUTH_TOKEN</code>) ist aktiv:</strong> Bestehende Agenten mit diesem Token behalten Vollzugriff. Sobald alle Agenten eigene Scoped-Tokens nutzen, kannst du ihn hier abschalten.
+        </div>
+        <button id="disable-legacy-btn" type="button" class="btn-sm btn-warn">Legacy-Token deaktivieren</button>
+      </div>
+
+      <div id="legacy-disabled-banner" class="banner banner-info hidden">
+        <div>
+          <strong>🔒 Legacy <code class="mono">MCP_AUTH_TOKEN</code> ist deaktiviert</strong> (in der Umgebung noch gesetzt, aber per Admin-Einstellung gesperrt).
+        </div>
+        <button id="enable-legacy-btn" type="button" class="btn-sm">Wieder aktivieren</button>
+      </div>
+
+      <!-- Local QR Pairing Card -->
+      <div id="qr-card" class="card hidden">
+        <h3>📱 WhatsApp neu koppeln (Lokaler QR-Code)</h3>
+        <p>Dieser QR-Code wird lokal auf deinem Server gerendert und nie an externe Dienste gesendet.</p>
+        <div class="qr-panel">
+          <div id="qr-svg-container" class="qr-svg-wrap"></div>
+          <div>
+            <p>1. Öffne WhatsApp auf deinem Smartphone</p>
+            <p>2. <strong>Einstellungen → Verknüpfte Geräte → Gerät hinzufügen</strong></p>
+            <p>3. QR-Code scannen (aktualisiert sich automatisch)</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Aktive Agent-Tokens</div>
+          <div id="stat-active-tokens" class="stat-value">–</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Tool-Aufrufe (24h)</div>
+          <div id="stat-calls-24h" class="stat-value">–</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Chats in DB</div>
+          <div id="stat-chats" class="stat-value">–</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Nachrichten in DB</div>
+          <div id="stat-messages" class="stat-value">–</div>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <div class="tab-group">
+          <button type="button" class="tab-btn active" data-tab="tokens">🔑 Agent-Tokens</button>
+          <button type="button" class="tab-btn" data-tab="audit">📜 Audit-Log</button>
+        </div>
+        <button id="new-token-btn" type="button" class="btn-primary">+ Neuer Agent-Token</button>
+      </div>
+
+      <!-- Tokens Tab -->
+      <section id="tab-tokens" class="card">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Agent / Name</th>
+                <th>Präfix &amp; Status</th>
+                <th>Rechte &amp; Chats</th>
+                <th>Ablauf &amp; Limits</th>
+                <th>Aktivität</th>
+                <th>Aktionen</th>
+              </tr>
+            </thead>
+            <tbody id="tokens-tbody"></tbody>
+          </table>
+        </div>
+        <div id="tokens-empty" class="hidden" style="padding: 20px 0; text-align:center; color: var(--muted);">
+          Noch keine DB-Tokens angelegt. Klicke auf <strong>+ Neuer Agent-Token</strong>, um einem lokalen KI-Agenten gezielten Zugriff zu geben.
+        </div>
+      </section>
+
+      <!-- Audit Tab -->
+      <section id="tab-audit" class="card hidden">
+        <div class="filter-bar">
+          <select id="audit-filter-token">
+            <option value="">Alle Tokens</option>
+          </select>
+          <select id="audit-filter-tool">
+            <option value="">Alle Tools / Events</option>
+            <option value="send_message">send_message</option>
+            <option value="edit_message">edit_message</option>
+            <option value="list_messages">list_messages</option>
+            <option value="list_recent_messages">list_recent_messages</option>
+            <option value="list_chats">list_chats</option>
+            <option value="get_chat">get_chat</option>
+            <option value="get_message_context">get_message_context</option>
+            <option value="search_messages">search_messages</option>
+            <option value="search_contacts">search_contacts</option>
+            <option value="auth">auth</option>
+            <option value="rate_limit">rate_limit</option>
+            <option value="admin:login">admin:login</option>
+            <option value="admin:token_create">admin:token_create</option>
+            <option value="admin:token_update">admin:token_update</option>
+            <option value="admin:token_revoke">admin:token_revoke</option>
+            <option value="admin:token_delete">admin:token_delete</option>
+            <option value="admin:settings">admin:settings</option>
+          </select>
+          <select id="audit-filter-status">
+            <option value="">Alle Status</option>
+            <option value="ok">ok</option>
+            <option value="denied">denied</option>
+            <option value="rate_limited">rate_limited</option>
+            <option value="error">error</option>
+          </select>
+          <button id="audit-refresh-btn" type="button" class="btn-sm">↻ Aktualisieren</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Zeit</th>
+                <th>Token / Agent</th>
+                <th>IP</th>
+                <th>Tool</th>
+                <th>Ziel-Chat</th>
+                <th>Status</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody id="audit-tbody"></tbody>
+          </table>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px;">
+          <span id="audit-page-info" class="subtext"></span>
+          <div style="display:flex; gap:8px;">
+            <button id="audit-prev-btn" type="button" class="btn-sm">← Zurück</button>
+            <button id="audit-next-btn" type="button" class="btn-sm">Weiter →</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Create / Edit Token Modal -->
+  <div id="token-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="token-modal-title">Neuer Agent-Token</h3>
+        <button type="button" class="btn-sm" id="token-modal-close">✕</button>
+      </div>
+      <form id="token-form">
+        <input type="hidden" id="edit-token-id" />
+        <div class="grid-2">
+          <div class="form-group">
+            <label class="field-label" for="token-name">Agent-Name *</label>
+            <input id="token-name" type="text" placeholder="z. B. OpenClaw Zuhause, n8n-Briefing" required />
+          </div>
+          <div class="form-group">
+            <label class="field-label" for="token-desc">Notiz (optional)</label>
+            <input id="token-desc" type="text" placeholder="Wofür darf der Agent zugreifen?" />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="field-label">1-Klick Preset</label>
+          <div class="pill-row" id="preset-pills">
+            <button type="button" class="btn-pill active" data-preset="read_all">Read-Only (Alle)</button>
+            <button type="button" class="btn-pill" data-preset="read_chats">Read-Only (Chats)</button>
+            <button type="button" class="btn-pill" data-preset="read_send_chats">Read + Send (Chats)</button>
+            <button type="button" class="btn-pill" data-preset="full">Full Access</button>
+            <button type="button" class="btn-pill" data-preset="custom">Custom</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="field-label">Erlaubte MCP-Tools</label>
+          <div id="tools-checkboxes" class="tool-grid"></div>
+        </div>
+
+        <div class="form-group">
+          <label class="field-label">Chat-Zugriff</label>
+          <div class="pill-row" style="margin-bottom:8px;">
+            <label class="check-item">
+              <input type="radio" name="chat-scope" value="all" checked /> Alle Chats
+            </label>
+            <label class="check-item">
+              <input type="radio" name="chat-scope" value="selected" /> Nur ausgewählte Chats
+            </label>
+          </div>
+          <div id="chat-picker-box" class="chat-picker hidden">
+            <div style="display:flex; gap:8px;">
+              <input id="chat-search-input" type="text" placeholder="Chats durchsuchen (Name oder JID)..." />
+              <button type="button" id="add-manual-jid-btn" class="btn-sm">+ JID hinzufügen</button>
+            </div>
+            <div id="selected-chats-summary" class="subtext" style="margin-top:6px;"></div>
+            <div id="chat-picker-list" class="chat-list"></div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="field-label">Gültigkeit / Ablaufzeit</label>
+          <div class="pill-row" id="ttl-pills">
+            <button type="button" class="btn-pill" data-ttl="1">1 Std</button>
+            <button type="button" class="btn-pill" data-ttl="24">24 Std</button>
+            <button type="button" class="btn-pill" data-ttl="168">7 Tage</button>
+            <button type="button" class="btn-pill" data-ttl="720">30 Tage</button>
+            <button type="button" class="btn-pill active" data-ttl="never">Unbegrenzt</button>
+            <button type="button" class="btn-pill hidden" id="ttl-keep-pill" data-ttl="keep">Beibehalten</button>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="form-group">
+            <label class="field-label" for="token-max-req">Max Requests / Min (optional)</label>
+            <input id="token-max-req" type="number" min="1" max="10000" placeholder="Standard (120/IP)" />
+          </div>
+          <div class="form-group">
+            <label class="field-label" for="token-max-sends">Max Sends / Std (optional)</label>
+            <input id="token-max-sends" type="number" min="1" max="10000" placeholder="Unbegrenzt" />
+          </div>
+        </div>
+
+        <div id="token-form-error" class="error-msg hidden"></div>
+        <div class="modal-footer">
+          <button type="button" id="token-modal-cancel">Abbrechen</button>
+          <button type="submit" class="btn-primary" id="token-save-btn">Token erstellen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Created Token Copy Config Modal -->
+  <div id="secret-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>✅ Agent-Token erstellt</h3>
+        <button type="button" class="btn-sm" id="secret-modal-close">✕</button>
+      </div>
+      <div class="banner banner-warn">
+        <span><strong>⚠️ Bitte jetzt kopieren:</strong> Der Token wird aus Sicherheitsgründen nur <strong>ein einziges Mal</strong> im Klartext angezeigt.</span>
+      </div>
+      <div class="form-group">
+        <label class="field-label">Bearer-Token</label>
+        <div style="display:flex; gap:8px;">
+          <input id="created-raw-token" type="text" readonly class="mono" />
+          <button type="button" class="btn-primary" id="copy-raw-token-btn">Kopieren</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="field-label" for="snippet-url-input">MCP-URL für deinen Agenten (anpassbar falls andere LAN-IP)</label>
+        <input id="snippet-url-input" type="text" class="mono" />
+      </div>
+
+      <div class="form-group">
+        <div class="pill-row" id="snippet-tabs" style="margin-bottom:8px;">
+          <button type="button" class="btn-pill active" data-snippet="gemini">Gemini CLI (httpUrl)</button>
+          <button type="button" class="btn-pill" data-snippet="claude">Claude / Cursor / Cline (url)</button>
+          <button type="button" class="btn-pill" data-snippet="curl">curl Test</button>
+        </div>
+        <pre id="snippet-output"></pre>
+        <button type="button" class="btn-sm" id="copy-snippet-btn">Snippet kopieren</button>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn-primary" id="secret-modal-done">Fertig</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const READ_TOOLS = [
+      "search_contacts",
+      "list_messages",
+      "list_recent_messages",
+      "list_chats",
+      "get_chat",
+      "get_message_context",
+      "search_messages"
+    ];
+    const WRITE_TOOLS = ["send_message", "edit_message"];
+    const ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS];
+    const PRESET_TOOLS = {
+      read_all: [...READ_TOOLS],
+      read_chats: [...READ_TOOLS],
+      read_send_chats: [...READ_TOOLS, "send_message"],
+      full: [...ALL_TOOLS],
+      custom: [...READ_TOOLS]
+    };
+
+    const state = {
+      mcpPort: 3010,
+      tokens: [],
+      chats: [],
+      auditOffset: 0,
+      auditLimit: 50,
+      auditTotal: 0,
+      selectedChats: new Set(),
+      selectedTtl: "never",
+      selectedPreset: "read_all",
+      createdRawToken: "",
+      activeSnippetTab: "gemini",
+      qrTimer: null
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    function esc(s) {
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function fmtDate(iso) {
+      if (!iso) return "–";
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return iso;
+      return d.toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" });
+    }
+
+    function fmtRelTime(iso) {
+      if (!iso) return "Nie";
+      const diffSec = Math.floor((Date.now() - Date.parse(iso)) / 1000);
+      if (diffSec < 60) return "gerade eben";
+      if (diffSec < 3600) return `vor ${Math.floor(diffSec / 60)} Min.`;
+      if (diffSec < 86400) return `vor ${Math.floor(diffSec / 3600)} Std.`;
+      return fmtDate(iso);
+    }
+
+    async function copyText(text, btn) {
+      const orig = btn.textContent;
+      let ok = false;
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(text);
+          ok = true;
+        } catch {
+          ok = false;
+        }
+      }
+      if (!ok) {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { ok = document.execCommand("copy"); } catch { ok = false; }
+        ta.remove();
+      }
+      btn.textContent = ok ? "✓ Kopiert!" : "Fehler";
+      setTimeout(() => { btn.textContent = orig; }, 1600);
+    }
+
+    async function api(url, opts = {}) {
+      const headers = { "X-Requested-With": "fetch", ...(opts.headers || {}) };
+      if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+      const res = await fetch(url, {
+        ...opts,
+        headers,
+        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+        credentials: "same-origin"
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401 && url !== "/api/login") {
+        showView("login");
+        throw new Error("Sitzung abgelaufen");
+      }
+      if (!res.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      return data;
+    }
+
+    function showView(name) {
+      $("view-unconfigured").classList.toggle("hidden", name !== "unconfigured");
+      $("view-login").classList.toggle("hidden", name !== "login");
+      $("view-app").classList.toggle("hidden", name !== "app");
+      if (name !== "app" && state.qrTimer) {
+        clearInterval(state.qrTimer);
+        state.qrTimer = null;
+      }
+    }
+
+    async function bootstrap() {
+      try {
+        const auth = await api("/api/auth/status");
+        if (!auth.configured) {
+          showView("unconfigured");
+          return;
+        }
+        if (!auth.authenticated) {
+          showView("login");
+          return;
+        }
+        showView("app");
+        await refreshAll();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function refreshAll() {
+      await Promise.all([loadStatus(), loadTokens(), loadChats()]);
+      await loadAudit();
+    }
+
+    async function loadStatus() {
+      const st = await api("/api/status");
+      state.mcpPort = st.mcpPort || 3010;
+
+      const waBadge = $("wa-status-badge");
+      if (st.whatsappConnected) {
+        waBadge.className = "badge badge-ok";
+        waBadge.innerHTML = `<span class="dot dot-ok"></span> Verbunden${st.whatsappUser ? ": " + esc(st.whatsappUser) : ""}`;
+      } else {
+        waBadge.className = "badge badge-danger";
+        waBadge.innerHTML = `<span class="dot dot-danger"></span> Getrennt`;
+      }
+
+      // Kill switch
+      const ksActive = Boolean(st.sendKillSwitch);
+      $("kill-switch-banner").classList.toggle("hidden", !ksActive);
+      const ksBtn = $("kill-switch-btn");
+      ksBtn.textContent = ksActive ? "🔓 Senden freigeben" : "🛡️ Senden pausieren";
+      ksBtn.className = ksActive ? "btn-primary" : "btn-warn";
+
+      // Legacy banner
+      $("legacy-banner").classList.toggle("hidden", !st.legacyTokenActive);
+      $("legacy-disabled-banner").classList.toggle(
+        "hidden",
+        !(st.legacyTokenConfigured && st.legacyTokenDisabled)
+      );
+
+      // QR code (local SVG)
+      const qrCard = $("qr-card");
+      if (!st.whatsappConnected && st.qrSvg) {
+        const doc = new DOMParser().parseFromString(st.qrSvg, "image/svg+xml");
+        const container = $("qr-svg-container");
+        container.replaceChildren(document.importNode(doc.documentElement, true));
+        qrCard.classList.remove("hidden");
+        if (!state.qrTimer) {
+          state.qrTimer = setInterval(() => loadStatus().catch(() => {}), 3000);
+        }
+      } else {
+        qrCard.classList.add("hidden");
+        if (state.qrTimer && st.whatsappConnected) {
+          clearInterval(state.qrTimer);
+          state.qrTimer = null;
+        }
+      }
+
+      $("stat-active-tokens").textContent = st.stats?.activeTokens ?? "0";
+      $("stat-calls-24h").textContent = st.stats?.calls24h ?? "0";
+      $("stat-chats").textContent = st.stats?.chatsCount ?? "0";
+      $("stat-messages").textContent = st.stats?.messagesCount ?? "0";
+    }
+
+    function getTokenStatus(t) {
+      if (t.revokedAt) return { label: "Widerrufen", cls: "badge-danger" };
+      if (t.isExpired) return { label: "Abgelaufen", cls: "badge-warn" };
+      if (!t.enabled) return { label: "Pausiert", cls: "badge-muted" };
+      return { label: "Aktiv", cls: "badge-ok" };
+    }
+
+    async function loadTokens() {
+      const data = await api("/api/tokens");
+      state.tokens = data.tokens || [];
+      renderTokens();
+      renderAuditTokenFilter();
+    }
+
+    function renderTokens() {
+      const tbody = $("tokens-tbody");
+      $("tokens-empty").classList.toggle("hidden", state.tokens.length > 0);
+      tbody.innerHTML = "";
+
+      for (const t of state.tokens) {
+        const st = getTokenStatus(t);
+        const canWrite = t.allowedTools.includes("send_message") || t.allowedTools.includes("edit_message");
+        const toolsBadge = canWrite
+          ? `<span class="badge badge-warn">Lesen + Schreiben (${t.allowedTools.length})</span>`
+          : `<span class="badge badge-info">Read-Only (${t.allowedTools.length})</span>`;
+        const chatsBadge = t.allowedChats === null
+          ? `<span class="badge badge-muted">Alle Chats</span>`
+          : `<span class="badge badge-muted">${t.allowedChats.length} Chat(s)</span>`;
+
+        const limits = [
+          t.maxReqPerMin ? `${t.maxReqPerMin} req/m` : null,
+          t.maxSendsPerHour ? `${t.maxSendsPerHour} sends/h` : null
+        ].filter(Boolean).join(" · ") || "Standard-Limits";
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>
+            <strong>${esc(t.name)}</strong>
+            ${t.description ? `<div class="subtext">${esc(t.description)}</div>` : ""}
+          </td>
+          <td>
+            <div class="mono">${esc(t.tokenPrefix)}…</div>
+            <div style="margin-top:4px;"><span class="badge ${st.cls}">${st.label}</span></div>
+          </td>
+          <td>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">${toolsBadge}${chatsBadge}</div>
+            <div class="subtext">${esc(t.allowedTools.join(", "))}</div>
+          </td>
+          <td>
+            <div>${t.expiresAt ? "Bis " + esc(fmtDate(t.expiresAt)) : "Unbegrenzt"}</div>
+            <div class="subtext">${esc(limits)}</div>
+          </td>
+          <td>
+            <div>${t.requestCount} Aufrufe</div>
+            <div class="subtext">${esc(fmtRelTime(t.lastUsedAt))}${t.lastUsedIp ? " · " + esc(t.lastUsedIp) : ""}</div>
+          </td>
+          <td>
+            <div class="actions-cell">
+              ${!t.revokedAt ? `<button type="button" class="btn-sm" data-act="toggle">${t.enabled ? "Pause" : "Aktivieren"}</button>` : ""}
+              ${!t.revokedAt ? `<button type="button" class="btn-sm" data-act="edit">Bearbeiten</button>` : ""}
+              ${!t.revokedAt ? `<button type="button" class="btn-sm btn-warn" data-act="revoke">Widerrufen</button>` : ""}
+              <button type="button" class="btn-sm btn-danger" data-act="delete">Löschen</button>
+            </div>
+          </td>
+        `;
+
+        tr.querySelector('[data-act="toggle"]')?.addEventListener("click", async () => {
+          await api(`/api/tokens/${encodeURIComponent(t.id)}`, {
+            method: "PATCH",
+            body: { enabled: !t.enabled }
+          });
+          await refreshAll();
+        });
+        tr.querySelector('[data-act="edit"]')?.addEventListener("click", () => openTokenModal(t));
+        tr.querySelector('[data-act="revoke"]')?.addEventListener("click", async () => {
+          if (!confirm(`Token "${t.name}" unwiderruflich widerrufen?`)) return;
+          await api(`/api/tokens/${encodeURIComponent(t.id)}/revoke`, { method: "POST" });
+          await refreshAll();
+        });
+        tr.querySelector('[data-act="delete"]')?.addEventListener("click", async () => {
+          if (!confirm(`Token "${t.name}" komplett aus der Datenbank löschen?`)) return;
+          await api(`/api/tokens/${encodeURIComponent(t.id)}`, { method: "DELETE" });
+          await refreshAll();
+        });
+
+        tbody.appendChild(tr);
+      }
+    }
+
+    function renderAuditTokenFilter() {
+      const sel = $("audit-filter-token");
+      const current = sel.value;
+      sel.innerHTML = `<option value="">Alle Tokens</option>
+        <option value="legacy-env">MCP_AUTH_TOKEN (Legacy)</option>
+        <option value="admin">Admin UI</option>`;
+      for (const t of state.tokens) {
+        const opt = document.createElement("option");
+        opt.value = t.id;
+        opt.textContent = `${t.name} (${t.tokenPrefix}…)`;
+        sel.appendChild(opt);
+      }
+      sel.value = current;
+    }
+
+    async function loadChats() {
+      const data = await api("/api/chats?limit=200");
+      state.chats = data.chats || [];
+      renderChatPicker();
+    }
+
+    async function loadAudit() {
+      const params = new URLSearchParams({
+        limit: String(state.auditLimit),
+        offset: String(state.auditOffset)
+      });
+      const tokenId = $("audit-filter-token").value;
+      const toolName = $("audit-filter-tool").value;
+      const status = $("audit-filter-status").value;
+      if (tokenId) params.set("tokenId", tokenId);
+      if (toolName) params.set("toolName", toolName);
+      if (status) params.set("status", status);
+
+      const data = await api(`/api/audit?${params.toString()}`);
+      state.auditTotal = data.total || 0;
+      const tbody = $("audit-tbody");
+      tbody.innerHTML = "";
+
+      for (const log of (data.logs || [])) {
+        const statusCls =
+          log.status === "ok" ? "badge-ok"
+          : log.status === "denied" ? "badge-danger"
+          : log.status === "rate_limited" ? "badge-warn"
+          : "badge-muted";
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td style="white-space:nowrap;">${esc(fmtDate(log.timestamp))}</td>
+          <td>${esc(log.tokenName || log.tokenId || "–")}</td>
+          <td class="mono">${esc(log.clientIp || "–")}</td>
+          <td class="mono">${esc(log.toolName)}</td>
+          <td class="mono">${esc(log.targetJid || "–")}</td>
+          <td><span class="badge ${statusCls}">${esc(log.status)}</span></td>
+          <td>${esc(log.summary || "")}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+
+      const start = state.auditTotal === 0 ? 0 : state.auditOffset + 1;
+      const end = Math.min(state.auditOffset + state.auditLimit, state.auditTotal);
+      $("audit-page-info").textContent = `${start}–${end} von ${state.auditTotal} Einträgen`;
+      $("audit-prev-btn").disabled = state.auditOffset <= 0;
+      $("audit-next-btn").disabled = state.auditOffset + state.auditLimit >= state.auditTotal;
+    }
+
+    // ─── Token Modal Logic ────────────────────────────────────────────
+    function buildToolCheckboxes(selectedTools) {
+      const box = $("tools-checkboxes");
+      box.innerHTML = "";
+      for (const tool of ALL_TOOLS) {
+        const isWrite = WRITE_TOOLS.includes(tool);
+        const lbl = document.createElement("label");
+        lbl.className = "check-item";
+        lbl.innerHTML = `
+          <input type="checkbox" value="${esc(tool)}" ${selectedTools.includes(tool) ? "checked" : ""} />
+          <span>${esc(tool)}</span>
+          ${isWrite ? '<span class="badge badge-warn" style="margin-left:auto; font-size:10px;">Write</span>' : ""}
+        `;
+        lbl.querySelector("input").addEventListener("change", () => {
+          setPresetActive("custom", false);
+        });
+        box.appendChild(lbl);
+      }
+    }
+
+    function setPresetActive(preset, applySelection = true) {
+      state.selectedPreset = preset;
+      document.querySelectorAll("#preset-pills .btn-pill").forEach((b) => {
+        b.classList.toggle("active", b.dataset.preset === preset);
+      });
+      if (!applySelection) return;
+
+      const tools = PRESET_TOOLS[preset] || READ_TOOLS;
+      document.querySelectorAll("#tools-checkboxes input[type=checkbox]").forEach((cb) => {
+        cb.checked = tools.includes(cb.value);
+      });
+
+      const scope = (preset === "read_chats" || preset === "read_send_chats") ? "selected" : "all";
+      document.querySelectorAll('input[name="chat-scope"]').forEach((r) => {
+        r.checked = r.value === scope;
+      });
+      $("chat-picker-box").classList.toggle("hidden", scope !== "selected");
+    }
+
+    function setTtlActive(ttl) {
+      state.selectedTtl = ttl;
+      document.querySelectorAll("#ttl-pills .btn-pill").forEach((b) => {
+        b.classList.toggle("active", b.dataset.ttl === ttl);
+      });
+    }
+
+    function renderChatPicker() {
+      const q = ($("chat-search-input").value || "").trim().toLowerCase();
+      const list = $("chat-picker-list");
+      list.innerHTML = "";
+
+      const knownJids = new Set(state.chats.map((c) => c.jid));
+      const combined = [...state.chats];
+      for (const jid of state.selectedChats) {
+        if (!knownJids.has(jid)) {
+          combined.unshift({ jid, name: jid, isGroup: jid.endsWith("@g.us") });
+        }
+      }
+
+      const filtered = combined.filter(
+        (c) => !q || (c.name && c.name.toLowerCase().includes(q)) || c.jid.toLowerCase().includes(q)
+      );
+
+      for (const chat of filtered) {
+        const row = document.createElement("label");
+        row.className = "chat-row";
+        const checked = state.selectedChats.has(chat.jid);
+        row.innerHTML = `
+          <span class="chat-row-left">
+            <input type="checkbox" style="width:auto; accent-color:var(--accent);" ${checked ? "checked" : ""} />
+            <span class="chat-name">${esc(chat.name)}</span>
+            ${chat.isGroup ? '<span class="badge badge-muted">Gruppe</span>' : ""}
+          </span>
+          <span class="mono subtext">${esc(chat.jid)}</span>
+        `;
+        row.querySelector("input").addEventListener("change", (e) => {
+          if (e.target.checked) state.selectedChats.add(chat.jid);
+          else state.selectedChats.delete(chat.jid);
+          updateSelectedChatsSummary();
+        });
+        list.appendChild(row);
+      }
+
+      if (filtered.length === 0) {
+        list.innerHTML = '<div class="subtext" style="padding:8px;">Keine passenden Chats gefunden.</div>';
+      }
+      updateSelectedChatsSummary();
+    }
+
+    function updateSelectedChatsSummary() {
+      $("selected-chats-summary").textContent =
+        `${state.selectedChats.size} Chat(s) ausgewählt`;
+    }
+
+    function openTokenModal(existing = null) {
+      $("token-form-error").classList.add("hidden");
+      if (existing) {
+        $("token-modal-title").textContent = "Agent-Token bearbeiten";
+        $("token-save-btn").textContent = "Änderungen speichern";
+        $("edit-token-id").value = existing.id;
+        $("token-name").value = existing.name;
+        $("token-desc").value = existing.description || "";
+        $("token-max-req").value = existing.maxReqPerMin ?? "";
+        $("token-max-sends").value = existing.maxSendsPerHour ?? "";
+        buildToolCheckboxes(existing.allowedTools);
+        state.selectedChats = new Set(existing.allowedChats || []);
+        const scope = existing.allowedChats === null ? "all" : "selected";
+        document.querySelectorAll('input[name="chat-scope"]').forEach((r) => {
+          r.checked = r.value === scope;
+        });
+        $("chat-picker-box").classList.toggle("hidden", scope !== "selected");
+        setPresetActive(existing.preset || "custom", false);
+        $("ttl-keep-pill").classList.remove("hidden");
+        setTtlActive("keep");
+      } else {
+        $("token-modal-title").textContent = "Neuer Agent-Token";
+        $("token-save-btn").textContent = "Token erstellen";
+        $("edit-token-id").value = "";
+        $("token-name").value = "";
+        $("token-desc").value = "";
+        $("token-max-req").value = "";
+        $("token-max-sends").value = "";
+        state.selectedChats = new Set();
+        buildToolCheckboxes(PRESET_TOOLS.read_all);
+        setPresetActive("read_all", true);
+        $("ttl-keep-pill").classList.add("hidden");
+        setTtlActive("never");
+      }
+      $("chat-search-input").value = "";
+      renderChatPicker();
+      $("token-modal").classList.remove("hidden");
+    }
+
+    function closeTokenModal() {
+      $("token-modal").classList.add("hidden");
+    }
+
+    function renderSnippet() {
+      const url = $("snippet-url-input").value.trim() || `http://${location.hostname}:${state.mcpPort}/sse`;
+      const tok = state.createdRawToken;
+      let text = "";
+      if (state.activeSnippetTab === "gemini") {
+        text = JSON.stringify({
+          mcpServers: {
+            whatsapp: {
+              httpUrl: url,
+              headers: { Authorization: `Bearer ${tok}` }
+            }
+          }
+        }, null, 2);
+      } else if (state.activeSnippetTab === "claude") {
+        text = JSON.stringify({
+          mcpServers: {
+            whatsapp: {
+              url,
+              headers: { Authorization: `Bearer ${tok}` }
+            }
+          }
+        }, null, 2);
+      } else {
+        text = `curl -X POST "${url}" \\\n  -H "Authorization: Bearer ${tok}" \\\n  -H "Content-Type: application/json" \\\n  -H "Accept: application/json, text/event-stream" \\\n  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`;
+      }
+      $("snippet-output").textContent = text;
+    }
+
+    function openSecretModal(rawToken) {
+      state.createdRawToken = rawToken;
+      $("created-raw-token").value = rawToken;
+      $("snippet-url-input").value = `http://${location.hostname}:${state.mcpPort}/sse`;
+      state.activeSnippetTab = "gemini";
+      document.querySelectorAll("#snippet-tabs .btn-pill").forEach((b) => {
+        b.classList.toggle("active", b.dataset.snippet === "gemini");
+      });
+      renderSnippet();
+      $("secret-modal").classList.remove("hidden");
+    }
+
+    // ─── Event Listeners ──────────────────────────────────────────────
+    $("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("login-error").classList.add("hidden");
+      try {
+        await api("/api/login", {
+          method: "POST",
+          body: { password: $("login-password").value }
+        });
+        $("login-password").value = "";
+        showView("app");
+        await refreshAll();
+      } catch (err) {
+        $("login-error").textContent = err.message;
+        $("login-error").classList.remove("hidden");
+      }
+    });
+
+    $("logout-btn").addEventListener("click", async () => {
+      await api("/api/logout", { method: "POST" });
+      showView("login");
+    });
+
+    const toggleKillSwitch = async () => {
+      const isOff = $("kill-switch-banner").classList.contains("hidden");
+      await api("/api/settings", {
+        method: "PATCH",
+        body: { sendKillSwitch: isOff }
+      });
+      await loadStatus();
+    };
+    $("kill-switch-btn").addEventListener("click", toggleKillSwitch);
+    $("kill-switch-off-btn").addEventListener("click", toggleKillSwitch);
+
+    $("disable-legacy-btn").addEventListener("click", async () => {
+      if (!confirm("Legacy MCP_AUTH_TOKEN jetzt deaktivieren? Agenten die noch diesen Token nutzen erhalten dann 401.")) return;
+      await api("/api/settings", { method: "PATCH", body: { legacyTokenDisabled: true } });
+      await loadStatus();
+    });
+    $("enable-legacy-btn").addEventListener("click", async () => {
+      await api("/api/settings", { method: "PATCH", body: { legacyTokenDisabled: false } });
+      await loadStatus();
+    });
+
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const tab = btn.dataset.tab;
+        document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
+        $("tab-tokens").classList.toggle("hidden", tab !== "tokens");
+        $("tab-audit").classList.toggle("hidden", tab !== "audit");
+        if (tab === "audit") loadAudit().catch(() => {});
+      });
+    });
+
+    $("new-token-btn").addEventListener("click", () => openTokenModal(null));
+    $("token-modal-close").addEventListener("click", closeTokenModal);
+    $("token-modal-cancel").addEventListener("click", closeTokenModal);
+
+    document.querySelectorAll("#preset-pills .btn-pill").forEach((btn) => {
+      btn.addEventListener("click", () => setPresetActive(btn.dataset.preset, true));
+    });
+    document.querySelectorAll("#ttl-pills .btn-pill").forEach((btn) => {
+      btn.addEventListener("click", () => setTtlActive(btn.dataset.ttl));
+    });
+    document.querySelectorAll('input[name="chat-scope"]').forEach((r) => {
+      r.addEventListener("change", () => {
+        $("chat-picker-box").classList.toggle("hidden", r.value !== "selected" || !r.checked);
+      });
+    });
+    $("chat-search-input").addEventListener("input", renderChatPicker);
+    $("add-manual-jid-btn").addEventListener("click", () => {
+      const jid = prompt("WhatsApp JID eingeben (z. B. 491761234567@s.whatsapp.net oder 12345@g.us):");
+      if (!jid) return;
+      const trimmed = jid.trim();
+      if (!trimmed.includes("@")) {
+        alert("Ungültige JID: muss '@' enthalten.");
+        return;
+      }
+      state.selectedChats.add(trimmed);
+      renderChatPicker();
+    });
+
+    $("token-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errEl = $("token-form-error");
+      errEl.classList.add("hidden");
+
+      const editId = $("edit-token-id").value;
+      const allowedTools = [];
+      document.querySelectorAll("#tools-checkboxes input:checked").forEach((cb) => {
+        allowedTools.push(cb.value);
+      });
+      if (allowedTools.length === 0) {
+        errEl.textContent = "Bitte mindestens ein Tool auswählen.";
+        errEl.classList.remove("hidden");
+        return;
+      }
+
+      const scope = document.querySelector('input[name="chat-scope"]:checked')?.value || "all";
+      const allowedChats = scope === "selected" ? [...state.selectedChats] : null;
+      if (scope === "selected" && allowedChats.length === 0) {
+        errEl.textContent = "Bitte mindestens einen Chat auswählen oder auf 'Alle Chats' umstellen.";
+        errEl.classList.remove("hidden");
+        return;
+      }
+
+      const maxReqRaw = $("token-max-req").value.trim();
+      const maxSendsRaw = $("token-max-sends").value.trim();
+
+      const body = {
+        name: $("token-name").value.trim(),
+        description: $("token-desc").value.trim() || null,
+        preset: state.selectedPreset,
+        allowedTools,
+        allowedChats,
+        maxReqPerMin: maxReqRaw ? Number.parseInt(maxReqRaw, 10) : null,
+        maxSendsPerHour: maxSendsRaw ? Number.parseInt(maxSendsRaw, 10) : null
+      };
+
+      if (state.selectedTtl === "never") {
+        if (editId) body.expiresAt = null;
+      } else if (state.selectedTtl !== "keep") {
+        body.ttlHours = Number.parseInt(state.selectedTtl, 10);
+      }
+
+      try {
+        if (editId) {
+          await api(`/api/tokens/${encodeURIComponent(editId)}`, { method: "PATCH", body });
+          closeTokenModal();
+          await refreshAll();
+        } else {
+          const res = await api("/api/tokens", { method: "POST", body });
+          closeTokenModal();
+          await refreshAll();
+          openSecretModal(res.token);
+        }
+      } catch (err) {
+        errEl.textContent = err.message;
+        errEl.classList.remove("hidden");
+      }
+    });
+
+    $("secret-modal-close").addEventListener("click", () => $("secret-modal").classList.add("hidden"));
+    $("secret-modal-done").addEventListener("click", () => $("secret-modal").classList.add("hidden"));
+    $("copy-raw-token-btn").addEventListener("click", () => copyText($("created-raw-token").value, $("copy-raw-token-btn")));
+    $("copy-snippet-btn").addEventListener("click", () => copyText($("snippet-output").textContent, $("copy-snippet-btn")));
+    $("snippet-url-input").addEventListener("input", renderSnippet);
+    document.querySelectorAll("#snippet-tabs .btn-pill").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.activeSnippetTab = btn.dataset.snippet;
+        document.querySelectorAll("#snippet-tabs .btn-pill").forEach((b) => b.classList.toggle("active", b === btn));
+        renderSnippet();
+      });
+    });
+
+    $("audit-refresh-btn").addEventListener("click", () => { state.auditOffset = 0; loadAudit(); });
+    $("audit-filter-token").addEventListener("change", () => { state.auditOffset = 0; loadAudit(); });
+    $("audit-filter-tool").addEventListener("change", () => { state.auditOffset = 0; loadAudit(); });
+    $("audit-filter-status").addEventListener("change", () => { state.auditOffset = 0; loadAudit(); });
+    $("audit-prev-btn").addEventListener("click", () => {
+      state.auditOffset = Math.max(0, state.auditOffset - state.auditLimit);
+      loadAudit();
+    });
+    $("audit-next-btn").addEventListener("click", () => {
+      if (state.auditOffset + state.auditLimit < state.auditTotal) {
+        state.auditOffset += state.auditLimit;
+        loadAudit();
+      }
+    });
+
+    bootstrap();
+  </script>
+</body>
+</html>

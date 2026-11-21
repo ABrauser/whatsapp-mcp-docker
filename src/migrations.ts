@@ -157,4 +157,62 @@ export const APP_MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    version: 5,
+    description: "create api_tokens, audit_logs, and app_settings tables",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS api_tokens (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          token_prefix TEXT NOT NULL,
+          token_hash TEXT NOT NULL UNIQUE,
+          preset TEXT NOT NULL,
+          allowed_tools TEXT NOT NULL,
+          allowed_chats TEXT,
+          max_req_per_min INTEGER,
+          max_sends_per_hour INTEGER,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          expires_at TEXT,
+          created_at TEXT NOT NULL,
+          revoked_at TEXT,
+          last_used_at TEXT,
+          last_used_ip TEXT,
+          request_count INTEGER NOT NULL DEFAULT 0
+        );
+      `);
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);`,
+      );
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS audit_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          timestamp TEXT NOT NULL,
+          token_id TEXT,
+          token_name TEXT,
+          client_ip TEXT,
+          tool_name TEXT NOT NULL,
+          target_jid TEXT,
+          status TEXT NOT NULL,
+          summary TEXT
+        );
+      `);
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC);`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_audit_logs_token_time ON audit_logs(token_id, timestamp DESC);`,
+      );
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+    },
+  },
 ];

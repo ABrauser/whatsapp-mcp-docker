@@ -5,16 +5,24 @@ services:
     restart: unless-stopped
     ports:
       - "3010:3010"
+      # Admin Web UI (restrict to 127.0.0.1:3011:3011 or management IP if preferred):
+      - "3011:3011"
     env_file:
       - .env
     environment:
       - MCP_PORT=3010
+      - MCP_ADMIN_PORT=3011
       - LOG_LEVEL=info
       - WHATSAPP_MCP_DATA_DIR=/app/data
       - WHATSAPP_AUTH_DIR=/app/auth_info
       # Read from .env (do NOT hardcode here):
+      - MCP_ADMIN_PASSWORD=${MCP_ADMIN_PASSWORD:-}
       - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
       - TZ=${TZ:-Europe/Berlin}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     # Named volumes inherit UID 1000 (`node`) from the image. If you switch to
     # bind mounts, make UID 1000 the owner first: `chown -R 1000 <host paths>`.
     volumes:

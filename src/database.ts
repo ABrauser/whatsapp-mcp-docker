@@ -619,6 +619,10 @@ export function getMessages(
   }
 }
 
+function buildInClause(values: readonly string[]): string {
+  return values.map(() => "?").join(", ");
+}
+
 /**
  * Cross-chat time-window query. Returns the most recent N messages across ALL
  * chats (or filtered to a chat) within the [since, until] window. Useful for
@@ -631,7 +635,9 @@ export function getRecentMessages(
   limit: number = 50,
   page: number = 0,
   includeStatus: boolean = false,
+  allowedChats?: string[] | null,
 ): Message[] {
+  if (allowedChats && allowedChats.length === 0) return [];
   const db = getDb();
   try {
     const offset = page * limit;
@@ -653,6 +659,10 @@ export function getRecentMessages(
     if (chatJid) {
       sql += ` AND m.chat_jid = ?`;
       params.push(chatJid);
+    }
+    if (allowedChats && allowedChats.length > 0) {
+      sql += ` AND m.chat_jid IN (${buildInClause(allowedChats)})`;
+      params.push(...allowedChats);
     }
     // Exclude WhatsApp Status broadcasts unless the caller opted in or is
     // explicitly filtering to that JID.
@@ -678,7 +688,9 @@ export function getChats(
   query?: string | null,
   includeLastMessage: boolean = true,
   includeStatus: boolean = false,
+  allowedChats?: string[] | null,
 ): Chat[] {
+  if (allowedChats && allowedChats.length === 0) return [];
   const db = getDb();
   try {
     const offset = page * limit;
@@ -710,6 +722,11 @@ export function getChats(
         `(LOWER(COALESCE(c.name, cr.display_name)) LIKE LOWER(?) OR c.jid LIKE ?)`,
       );
       params.push(`%${query}%`, `%${query}%`);
+    }
+
+    if (allowedChats && allowedChats.length > 0) {
+      whereClauses.push(`c.jid IN (${buildInClause(allowedChats)})`);
+      params.push(...allowedChats);
     }
 
     // The Status "chat" is internal-only; hide unless explicitly requested.
@@ -834,21 +851,33 @@ export function getMessagesAround(
 
 export function searchDbForContacts(
   query: string,
-  limit: number = 20
+  limit: number = 20,
+  allowedChats?: string[] | null,
 ): { jid: string; name: string | null }[] {
+  if (allowedChats && allowedChats.length === 0) return [];
   const db = getDb();
   try {
     const pattern = `%${query}%`;
+    const params: (string | number)[] = [pattern];
+    let allowClause = "";
+
+    if (allowedChats && allowedChats.length > 0) {
+      const ph = buildInClause(allowedChats);
+      allowClause = ` AND (cr.jid IN (${ph}) OR cr.jid IN (SELECT DISTINCT sender FROM messages WHERE sender IS NOT NULL AND chat_jid IN (${ph})))`;
+      params.push(...allowedChats, ...allowedChats);
+    }
+    params.push(limit);
 
     const stmt = db.prepare(`
       SELECT cr.jid AS jid, cr.display_name AS display_name
       FROM contacts_resolved cr
       WHERE
         LOWER(COALESCE(cr.display_name, cr.jid)) LIKE LOWER(?)
+        ${allowClause}
       LIMIT ?
     `);
 
-    const rows = stmt.all(pattern, limit) as {
+    const rows = stmt.all(...params) as {
       jid: string;
       display_name: string | null;
     }[];
@@ -884,7 +913,9 @@ export function searchMessages(
   limit: number = 10,
   page: number = 0,
   includeStatus: boolean = false,
+  allowedChats?: string[] | null,
 ): Message[] {
+  if (allowedChats && allowedChats.length === 0) return [];
   const db = getDb();
   try {
     const offset = page * limit;
@@ -923,6 +954,10 @@ export function searchMessages(
     if (chatJid) {
       sql += ` AND m.chat_jid = ?`;
       params.push(chatJid);
+    }
+    if (allowedChats && allowedChats.length > 0) {
+      sql += ` AND m.chat_jid IN (${buildInClause(allowedChats)})`;
+      params.push(...allowedChats);
     }
     if (!includeStatus && chatJid !== STATUS_BROADCAST_JID) {
       sql += ` AND m.chat_jid != ?`;

@@ -1,10 +1,12 @@
 # WhatsApp MCP — Status & Open Tasks
 
-Stand: 2026-05-10. Lebt im Repo, damit der Kontext nicht mit dem Chat verloren geht.
+Stand: 2026-11-21. Lebt im Repo, damit der Kontext nicht mit dem Chat verloren geht.
 
-## ✅ Production-Ready Hardening — abgeschlossen (siehe Commit-Verlauf)
+## ✅ Production-Ready Hardening & Multi-Token Auth — abgeschlossen
 
-- **Schema-Versioning** — `src/migrations.ts` mit `schema_migrations`-Tabelle. Jede Migration läuft genau einmal in eigener Transaktion. Aktuelle Versionen 1–3.
+- **Schema-Versioning** — `src/migrations.ts` mit `schema_migrations`-Tabelle. Aktuelle Versionen 1–5 (inkl. `api_tokens`, `audit_logs`, `app_settings`).
+- **Multi-Token & Admin Web UI (Port 3011)** — `src/tokens.ts`, `src/admin.ts`, `src/admin/index.html`. Scoped Bearer-Tokens (`wamcp_…`), SHA-256-Hash-Speicherung, Tool- & Chat-Allowlists, TTL, Per-Token-Rate/Send-Caps, Audit-Log-Viewer, Send-Kill-Switch, lokaler SVG-QR-Code (ohne `quickchart.io`).
+- **Fail-Closed Auth & Security Fixes** — Dependencies auf `0` npm-audit-Schwachstellen aktualisiert (SDK `1.32.2`, Zod `4.x`, Express `5.3.0`), `timingSafeEqual`, keine Token-Hints in Logs, Pagination-Obergrenzen, `generateHighQualityLinkPreview: false`.
 - **`sender_push_name`** auf `messages` — Always-Capture aus `msg.pushName`. Behebt "Unknown" für Sticker / Media-Messages ohne `key.participant`.
 - **`contacts_resolved` SQL-View** — DRY: alle Read-Queries (`getChats`, `getChat`, `getMessages`, `getRecentMessages`, `getMessagesAround`, `searchMessages`, `searchDbForContacts`) joinen jetzt einen einzigen View statt drei duplizierte CASE-WHEN-Blöcke zu pflegen.
 - **Fuzzy Match (Wort-Overlap)** — `src/contactResolver.ts`. "Mary Grace Bauer" → "Mary Bauer" wenn genau ein eindeutiger Match in den `@s.whatsapp.net`-Kontakten existiert. Min. 2 Tokens beim Saved-Name als False-Positive-Guard. Cache wird beim Contact-Write invalidated.
@@ -26,18 +28,19 @@ Stand: 2026-05-10. Lebt im Repo, damit der Kontext nicht mit dem Chat verloren g
 
 ## 📋 Aktueller Code-Stand
 
-**Tools (8):**
+**Tools (9):**
 
 1. `search_contacts` — Kontakte suchen
-2. `list_messages` — Messages eines Chats (mit `since`/`until`)
-3. `list_recent_messages` — Cross-Chat Time-Window
-4. `list_chats` — Chats auflisten (sortiert)
+2. `list_messages` — Messages eines Chats (mit `since`/`until`, max 200)
+3. `list_recent_messages` — Cross-Chat Time-Window (max 500)
+4. `list_chats` — Chats auflisten (sortiert, max 100)
 5. `get_chat` — Chat-Details
-6. `get_message_context` — Messages um eine Message herum
-7. `send_message` — Nachricht senden (mit Audit-Log)
-8. `search_messages` — FTS5 Volltext-Suche
+6. `get_message_context` — Messages um eine Message herum (max 50)
+7. `send_message` — Nachricht senden (mit Audit-Log, Kill-Switch & stündl. Limit)
+8. `edit_message` — Eigene Nachricht bearbeiten
+9. `search_messages` — FTS5 Volltext-Suche (max 100)
 
-**Auth:** Bearer-Token via `MCP_AUTH_TOKEN`. Tolerant gegenüber Scheme-Casing und Whitespace. Diagnostische 401-Logs (truncated token hint).
+**Auth:** Fail-Closed Bearer-Token-Auth über DB-Tokens (`api_tokens`) und optional abwärtskompatiblen `MCP_AUTH_TOKEN` (Legacy). Admin UI auf Port `3011` (`MCP_ADMIN_PASSWORD`).
 
 **Rate Limit:** 120 req/min/IP auf `/sse`, anpassbar via `MCP_RATE_LIMIT_PER_MIN`.
 

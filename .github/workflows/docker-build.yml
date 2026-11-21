@@ -3,6 +3,9 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [main]
+  schedule:
+    # Weekly rebuild to pull base-image (node:24-alpine) security patches
+    - cron: "0 4 * * 1"
   workflow_dispatch:
 
 env:

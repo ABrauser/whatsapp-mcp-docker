@@ -4,6 +4,8 @@ import { initializeDatabase, closeDatabase } from "./database.ts";
 import { findUnwritable, isAppDataFile } from "./preflight.ts";
 import { startWhatsAppConnection, stopWhatsAppConnection, AUTH_DIR, type WhatsAppConnection } from "./whatsapp.ts";
 import { startMcpServer } from "./mcp.ts";
+import { startAdminServer } from "./admin.ts";
+import { pruneAuditLogs } from "./tokens.ts";
 import { initContactOverrides, closeContactOverrides } from "./contactOverrides.ts";
 import { type Server } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -13,6 +15,15 @@ if (!Number.isFinite(port) || port < 1 || port > 65535) {
   console.error(`❌ Invalid MCP_PORT: "${process.env.MCP_PORT}"`);
   process.exit(1);
 }
+
+const rawAdminPort = (process.env.MCP_ADMIN_PORT ?? "3011").trim().toLowerCase();
+const adminEnabled = rawAdminPort !== "0" && rawAdminPort !== "disabled" && rawAdminPort !== "false";
+const adminPort = adminEnabled ? Number.parseInt(rawAdminPort, 10) : 0;
+if (adminEnabled && (!Number.isFinite(adminPort) || adminPort < 1 || adminPort > 65535)) {
+  console.error(`❌ Invalid MCP_ADMIN_PORT: "${process.env.MCP_ADMIN_PORT}"`);
+  process.exit(1);
+}
+const adminBind = (process.env.MCP_ADMIN_BIND || "0.0.0.0").trim();
 const dataDir = process.env.WHATSAPP_MCP_DATA_DIR || ".";
 
 // The container runs as the unprivileged `node` user. If a bind mount is still
@@ -69,7 +80,9 @@ const mcpLogger = await buildRotatingLogger(`${dataDir}/mcp-logs.txt`);
 
 let whatsappConnection: WhatsAppConnection | null = null;
 let httpServer: Server | null = null;
+let adminHttpServer: Server | null = null;
 let mcpServer: McpServer | null = null;
+let auditPruneTimer: NodeJS.Timeout | null = null;
 
 async function main() {
   console.log("╔══════════════════════════════════════════════════════╗");
@@ -83,6 +96,18 @@ async function main() {
     initializeDatabase();
     mcpLogger.info("Database initialized successfully.");
     console.log("✅ Database initialized");
+
+    const pruned = pruneAuditLogs();
+    if (pruned > 0) {
+      mcpLogger.info(`Pruned ${pruned} old audit log entries on startup.`);
+    }
+    auditPruneTimer = setInterval(() => {
+      const removed = pruneAuditLogs();
+      if (removed > 0) {
+        mcpLogger.info(`Periodic audit log prune removed ${removed} entries.`);
+      }
+    }, 6 * 3600_000);
+    auditPruneTimer.unref();
 
     initContactOverrides(dataDir);
 
@@ -105,9 +130,20 @@ async function main() {
     httpServer = result.httpServer;
     mcpServer = result.mcpServer;
     mcpLogger.info("MCP Server started and listening.");
+
+    if (adminEnabled) {
+      const adminRes = await startAdminServer(whatsappConnection, mcpLogger, {
+        adminPort,
+        adminBind,
+        mcpPort: result.port,
+      });
+      adminHttpServer = adminRes.httpServer;
+    } else {
+      mcpLogger.info("Admin UI server disabled via MCP_ADMIN_PORT.");
+    }
   } catch (error: any) {
-    mcpLogger.fatal({ err: error }, "Failed to start MCP server");
-    console.error("❌ Failed to start MCP server:", error.message);
+    mcpLogger.fatal({ err: error }, "Failed to start MCP or Admin server");
+    console.error("❌ Failed to start HTTP servers:", error.message);
     process.exit(1);
   }
 
@@ -120,6 +156,19 @@ async function shutdown(signal: string) {
   shuttingDown = true;
   mcpLogger.info(`Received ${signal}. Shutting down gracefully...`);
   console.log(`\n🛑 Received ${signal}. Shutting down...`);
+
+  if (auditPruneTimer) {
+    clearInterval(auditPruneTimer);
+    auditPruneTimer = null;
+  }
+
+  if (adminHttpServer) {
+    const adminSrv = adminHttpServer;
+    mcpLogger.info("Closing Admin HTTP server...");
+    await new Promise<void>((resolve) => {
+      adminSrv.close(() => resolve());
+    });
+  }
 
   if (httpServer) {
     const srv = httpServer;
