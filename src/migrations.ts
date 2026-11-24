@@ -215,4 +215,20 @@ export const APP_MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 6,
+    description: "repair corrupted non-ISO chats.last_message_time values",
+    up(db) {
+      db.exec(`
+        UPDATE chats
+        SET last_message_time = (
+          SELECT MAX(m.timestamp)
+          FROM messages m
+          WHERE m.chat_jid = chats.jid
+        )
+        WHERE last_message_time IS NOT NULL
+          AND last_message_time NOT GLOB '[0-9][0-9][0-9][0-9]-*';
+      `);
+    },
+  },
 ];

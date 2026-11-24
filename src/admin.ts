@@ -8,8 +8,9 @@ import { renderSVG } from "uqr";
 import { z } from "zod";
 import type { Logger } from "pino";
 
-import { getChats } from "./database.ts";
-import { getOverride } from "./contactOverrides.ts";
+import { getDb, searchChatsAndContactsForPicker } from "./database.ts";
+import { getOverride, listOverrides } from "./contactOverrides.ts";
+import { resolveByPushName } from "./contactResolver.ts";
 import type { WhatsAppConnection } from "./whatsapp.ts";
 import {
   ALL_TOOLS,
@@ -361,19 +362,67 @@ export async function startAdminServer(
     });
   });
 
-  // ─── Chat Picker List ───────────────────────────────────────────────
+  // ─── Chat / Person Picker List ──────────────────────────────────────
   app.get("/api/chats", requireAdminAuth, (req: Request, res: Response) => {
     const q = typeof req.query.q === "string" ? req.query.q.trim() : null;
-    const rawLimit = Number.parseInt(String(req.query.limit ?? "100"), 10);
-    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, rawLimit), 200) : 100;
+    const rawType = typeof req.query.type === "string" ? req.query.type.trim() : "all";
+    const type: "all" | "person" | "group" =
+      rawType === "person" || rawType === "group" ? rawType : "all";
+    const rawLimit = Number.parseInt(String(req.query.limit ?? "150"), 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, rawLimit), 300) : 150;
 
-    const chats = getChats(limit, 0, "last_active", q || null, false, false);
-    const formatted = chats.map((c) => ({
-      jid: c.jid,
-      name: getOverride(c.jid) ?? c.name ?? c.jid.split("@")[0] ?? c.jid,
-      isGroup: c.jid.endsWith("@g.us"),
-      lastMessageTime: c.last_message_time ? c.last_message_time.toISOString() : null,
-    }));
+    const db = getDb();
+    const entries = searchChatsAndContactsForPicker({
+      query: q || null,
+      type,
+      limit,
+    });
+
+    const formatted = entries.map((entry) => {
+      const override = getOverride(entry.jid);
+      const fuzzy =
+        !override && !entry.isGroup && entry.name
+          ? resolveByPushName(entry.name, db)?.name ?? null
+          : null;
+      return {
+        jid: entry.jid,
+        name: override ?? fuzzy ?? entry.name ?? entry.jid.split("@")[0] ?? entry.jid,
+        isGroup: entry.isGroup,
+        isContactOnly: entry.isContactOnly,
+        lastMessageTime: entry.lastMessageTime ? entry.lastMessageTime.toISOString() : null,
+      };
+    });
+
+    if (q) {
+      const qLower = q.toLowerCase();
+      const existingJids = new Set(formatted.map((f) => f.jid));
+      const overrideMatches: typeof formatted = [];
+      for (const [jid, displayName] of Object.entries(listOverrides())) {
+        if (existingJids.has(jid)) continue;
+        const isGroup = jid.endsWith("@g.us");
+        if (type === "group" && !isGroup) continue;
+        if (type === "person" && isGroup) continue;
+        if (
+          displayName.toLowerCase().includes(qLower) ||
+          jid.toLowerCase().includes(qLower)
+        ) {
+          existingJids.add(jid);
+          overrideMatches.push({
+            jid,
+            name: displayName,
+            isGroup,
+            isContactOnly: true,
+            lastMessageTime: null,
+          });
+        }
+      }
+      if (overrideMatches.length > 0) {
+        formatted.unshift(...overrideMatches);
+        if (formatted.length > limit) {
+          formatted.length = limit;
+        }
+      }
+    }
 
     res.json({ chats: formatted });
   });

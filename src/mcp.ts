@@ -1403,21 +1403,22 @@ export async function startMcpServer(
   });
 
   // ─── Start the HTTP server ──────────────────────────────────
-  const bindHost = options?.bindHost || "0.0.0.0";
+  const bindHost = options?.bindHost?.trim() || process.env.MCP_BIND?.trim() || null;
   return new Promise((resolve) => {
-    const httpServer = app.listen(port, bindHost, () => {
+    const onListening = () => {
       const addr = httpServer.address();
       const boundPort = typeof addr === "object" && addr ? addr.port : port;
-      mcpLogger.info(`MCP server listening on http://${bindHost}:${boundPort}`);
+      const displayHost = bindHost ?? "0.0.0.0";
+      mcpLogger.info(`MCP server listening on http://${displayHost}:${boundPort}`);
       if (!options?.quiet) {
         const activeDb = countActiveApiTokens();
         const legacyOn = isLegacyEnvTokenActive();
         const adminPort = process.env.MCP_ADMIN_PORT || "3011";
-        console.log(`\n🚀 MCP Server ready at http://${bindHost}:${boundPort}`);
-        console.log(`   MCP endpoint:    http://${bindHost}:${boundPort}/sse`);
-        console.log(`   Health check:    http://${bindHost}:${boundPort}/health`);
+        console.log(`\n🚀 MCP Server ready at http://${displayHost}:${boundPort}`);
+        console.log(`   MCP endpoint:    http://${displayHost}:${boundPort}/sse`);
+        console.log(`   Health check:    http://${displayHost}:${boundPort}/health`);
         if (adminPort !== "0" && adminPort !== "disabled") {
-          console.log(`   Admin UI:        http://${bindHost}:${adminPort}/`);
+          console.log(`   Admin UI:        http://${displayHost}:${adminPort}/`);
         }
         console.log(
           `   Auth:            Bearer required (fail-closed) | DB tokens: ${activeDb} | Legacy env token: ${legacyOn ? "active" : "off"}`,
@@ -1428,6 +1429,9 @@ export async function startMcpServer(
         console.log(`   ⚠️  Gemini CLI: must use "httpUrl" (Streamable HTTP), not "url" (legacy SSE).\n`);
       }
       resolve({ httpServer, mcpServer, port: boundPort });
-    });
+    };
+    const httpServer = bindHost
+      ? app.listen(port, bindHost, onListening)
+      : app.listen(port, onListening);
   });
 }

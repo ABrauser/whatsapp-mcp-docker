@@ -612,8 +612,48 @@ export function expandAllowedChats(allowedChats: string[] | null): Set<string> |
       if (lid) set.add(lid);
       if (s) set.add(s);
     }
+
+    // Also expand via contacts.phone_number for @lid <-> @s.whatsapp.net pairs
+    // that haven't produced a lid_aliases row yet.
+    const lidJids = [...set].filter((j) => j.endsWith("@lid"));
+    if (lidJids.length > 0) {
+      const lidPh = lidJids.map(() => "?").join(", ");
+      const phoneRows = db
+        .prepare(
+          `SELECT phone_number FROM contacts
+           WHERE jid IN (${lidPh}) AND phone_number IS NOT NULL AND TRIM(phone_number) != ''`,
+        )
+        .all(...lidJids) as { phone_number: string }[];
+      for (const r of phoneRows) {
+        const cleanDigits = r.phone_number.replace(/[^0-9]/g, "");
+        if (cleanDigits) {
+          const sJid = normalizeChatJid(`${cleanDigits}@s.whatsapp.net`);
+          if (sJid) set.add(sJid);
+        }
+      }
+    }
+
+    const phones = new Set<string>();
+    for (const jid of set) {
+      const m = jid.match(/^(\d+)@s\.whatsapp\.net$/);
+      if (m) phones.add(m[1]);
+    }
+    if (phones.size > 0) {
+      const phoneList = [...phones];
+      const phonePh = phoneList.map(() => "?").join(", ");
+      const lidRows = db
+        .prepare(
+          `SELECT jid FROM contacts
+           WHERE jid LIKE '%@lid' AND phone_number IN (${phonePh})`,
+        )
+        .all(...phoneList) as { jid: string }[];
+      for (const r of lidRows) {
+        const lid = normalizeChatJid(r.jid);
+        if (lid) set.add(lid);
+      }
+    }
   } catch {
-    // lid_aliases may not exist in isolated unit test DBs without migrations
+    // lid_aliases/contacts may not exist in isolated unit test DBs without migrations
   }
 
   return set;

@@ -36,5 +36,8 @@ EXPOSE 3010 3011
 # this at startup and fails fast with instructions otherwise.
 USER node
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:3010/health || exit 1
+
 # Node 24+: node:sqlite is stable, type-stripping is on by default for .ts entry.
 CMD ["node", "src/main.ts"]

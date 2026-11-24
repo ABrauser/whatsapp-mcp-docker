@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import pino from "pino";
 
-import { initializeDatabase, closeDatabase, storeChat } from "../src/database.ts";
+import { initializeDatabase, closeDatabase, storeChat, storeContact } from "../src/database.ts";
 import { startAdminServer } from "../src/admin.ts";
 import type { WhatsAppConnection } from "../src/whatsapp.ts";
 
@@ -49,6 +49,15 @@ beforeEach(() => {
     jid: "491761234567@s.whatsapp.net",
     name: "Test Contact",
     last_message_time: new Date("2026-10-01T12:00:00Z"),
+  });
+  storeChat({
+    jid: "120363000999@g.us",
+    name: "Test Group",
+    last_message_time: new Date("2026-10-01T11:00:00Z"),
+  });
+  storeContact({
+    jid: "491767654321@s.whatsapp.net",
+    name: "Contact Only Person",
   });
 });
 
@@ -152,13 +161,35 @@ test("login, cookie security flags, CSRF enforcement, token CRUD, settings, audi
     assert.equal(statusConnected.whatsappConnected, true);
     assert.equal(statusConnected.qrSvg, null);
 
-    // Chats endpoint returns seeded chat
+    // Chats endpoint returns seeded chats & contacts and supports type/query filters
     const chatsRes = await fetch(`${srv.baseUrl}/api/chats`, {
       headers: { Cookie: cookieHeader },
     });
     const chatsData = (await chatsRes.json()) as any;
-    assert.equal(chatsData.chats.length, 1);
+    assert.equal(chatsData.chats.length, 3);
     assert.equal(chatsData.chats[0].jid, "491761234567@s.whatsapp.net");
+
+    const personsRes = await fetch(`${srv.baseUrl}/api/chats?type=person`, {
+      headers: { Cookie: cookieHeader },
+    });
+    const personsData = (await personsRes.json()) as any;
+    assert.equal(personsData.chats.length, 2);
+    assert.ok(personsData.chats.every((c: any) => !c.isGroup));
+
+    const groupsRes = await fetch(`${srv.baseUrl}/api/chats?type=group`, {
+      headers: { Cookie: cookieHeader },
+    });
+    const groupsData = (await groupsRes.json()) as any;
+    assert.equal(groupsData.chats.length, 1);
+    assert.equal(groupsData.chats[0].jid, "120363000999@g.us");
+
+    const searchRes = await fetch(`${srv.baseUrl}/api/chats?type=person&q=Contact%20Only`, {
+      headers: { Cookie: cookieHeader },
+    });
+    const searchData = (await searchRes.json()) as any;
+    assert.equal(searchData.chats.length, 1);
+    assert.equal(searchData.chats[0].jid, "491767654321@s.whatsapp.net");
+    assert.equal(searchData.chats[0].isContactOnly, true);
 
     // Token CRUD
     const createRes = await fetch(`${srv.baseUrl}/api/tokens`, {

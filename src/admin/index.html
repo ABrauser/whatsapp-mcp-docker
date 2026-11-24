@@ -602,8 +602,13 @@ MCP_ADMIN_PORT=3011</pre>
             </label>
           </div>
           <div id="chat-picker-box" class="chat-picker hidden">
+            <div class="pill-row" id="chat-type-pills" style="margin-bottom:8px;">
+              <button type="button" class="btn-pill active" data-chat-type="all">Alle</button>
+              <button type="button" class="btn-pill" data-chat-type="person">Personen</button>
+              <button type="button" class="btn-pill" data-chat-type="group">Gruppen</button>
+            </div>
             <div style="display:flex; gap:8px;">
-              <input id="chat-search-input" type="text" placeholder="Chats durchsuchen (Name oder JID)..." />
+              <input id="chat-search-input" type="text" placeholder="Personen oder Gruppen durchsuchen (Name oder JID)..." />
               <button type="button" id="add-manual-jid-btn" class="btn-sm">+ JID hinzufügen</button>
             </div>
             <div id="selected-chats-summary" class="subtext" style="margin-top:6px;"></div>
@@ -706,6 +711,10 @@ MCP_ADMIN_PORT=3011</pre>
       mcpPort: 3010,
       tokens: [],
       chats: [],
+      chatTypeFilter: "all",
+      selectedChatMeta: new Map(),
+      chatSearchTimer: null,
+      chatLoadSeq: 0,
       auditOffset: 0,
       auditLimit: 50,
       auditTotal: 0,
@@ -977,9 +986,23 @@ MCP_ADMIN_PORT=3011</pre>
       sel.value = current;
     }
 
-    async function loadChats() {
-      const data = await api("/api/chats?limit=200");
+    async function loadChats(query = "", type = state.chatTypeFilter) {
+      const seq = ++state.chatLoadSeq;
+      const params = new URLSearchParams({
+        limit: "150",
+        type: type || "all"
+      });
+      if (query && query.trim()) {
+        params.set("q", query.trim());
+      }
+      const data = await api(`/api/chats?${params.toString()}`);
+      if (seq !== state.chatLoadSeq) return;
       state.chats = data.chats || [];
+      for (const c of state.chats) {
+        if (state.selectedChats.has(c.jid)) {
+          state.selectedChatMeta.set(c.jid, c);
+        }
+      }
       renderChatPicker();
     }
 
@@ -1072,6 +1095,13 @@ MCP_ADMIN_PORT=3011</pre>
       });
     }
 
+    function setChatTypeFilter(type) {
+      state.chatTypeFilter = type || "all";
+      document.querySelectorAll("#chat-type-pills .btn-pill").forEach((b) => {
+        b.classList.toggle("active", b.dataset.chatType === state.chatTypeFilter);
+      });
+    }
+
     function renderChatPicker() {
       const q = ($("chat-search-input").value || "").trim().toLowerCase();
       const list = $("chat-picker-list");
@@ -1079,49 +1109,66 @@ MCP_ADMIN_PORT=3011</pre>
 
       const knownJids = new Set(state.chats.map((c) => c.jid));
       const combined = [...state.chats];
-      for (const jid of state.selectedChats) {
-        if (!knownJids.has(jid)) {
-          combined.unshift({ jid, name: jid, isGroup: jid.endsWith("@g.us") });
+
+      // When no search query is active, also keep selected chats visible at the top
+      // (filtered by active type pill) so the user always sees what's selected.
+      if (!q) {
+        for (const jid of state.selectedChats) {
+          if (knownJids.has(jid)) continue;
+          const isGroup = jid.endsWith("@g.us");
+          if (state.chatTypeFilter === "group" && !isGroup) continue;
+          if (state.chatTypeFilter === "person" && isGroup) continue;
+          const meta = state.selectedChatMeta.get(jid);
+          combined.unshift(meta || { jid, name: jid, isGroup, isContactOnly: false });
         }
       }
 
-      const filtered = combined.filter(
-        (c) => !q || (c.name && c.name.toLowerCase().includes(q)) || c.jid.toLowerCase().includes(q)
-      );
-
-      for (const chat of filtered) {
+      for (const chat of combined) {
         const row = document.createElement("label");
         row.className = "chat-row";
         const checked = state.selectedChats.has(chat.jid);
+        const typeBadge = chat.isGroup
+          ? '<span class="badge badge-muted">Gruppe</span>'
+          : '<span class="badge badge-info">Person</span>';
+        const contactBadge = chat.isContactOnly
+          ? '<span class="badge badge-muted">Kontakt</span>'
+          : '';
         row.innerHTML = `
           <span class="chat-row-left">
             <input type="checkbox" style="width:auto; accent-color:var(--accent);" ${checked ? "checked" : ""} />
             <span class="chat-name">${esc(chat.name)}</span>
-            ${chat.isGroup ? '<span class="badge badge-muted">Gruppe</span>' : ""}
+            ${typeBadge}
+            ${contactBadge}
           </span>
           <span class="mono subtext">${esc(chat.jid)}</span>
         `;
         row.querySelector("input").addEventListener("change", (e) => {
-          if (e.target.checked) state.selectedChats.add(chat.jid);
-          else state.selectedChats.delete(chat.jid);
+          if (e.target.checked) {
+            state.selectedChats.add(chat.jid);
+            state.selectedChatMeta.set(chat.jid, chat);
+          } else {
+            state.selectedChats.delete(chat.jid);
+          }
           updateSelectedChatsSummary();
         });
         list.appendChild(row);
       }
 
-      if (filtered.length === 0) {
-        list.innerHTML = '<div class="subtext" style="padding:8px;">Keine passenden Chats gefunden.</div>';
+      if (combined.length === 0) {
+        list.innerHTML = '<div class="subtext" style="padding:8px;">Keine passenden Personen oder Gruppen gefunden.</div>';
       }
       updateSelectedChatsSummary();
     }
 
     function updateSelectedChatsSummary() {
       $("selected-chats-summary").textContent =
-        `${state.selectedChats.size} Chat(s) ausgewählt`;
+        `${state.selectedChats.size} Chat(s) / Person(en) ausgewählt`;
     }
 
     function openTokenModal(existing = null) {
       $("token-form-error").classList.add("hidden");
+      state.selectedChatMeta = new Map();
+      setChatTypeFilter("all");
       if (existing) {
         $("token-modal-title").textContent = "Agent-Token bearbeiten";
         $("token-save-btn").textContent = "Änderungen speichern";
@@ -1156,6 +1203,7 @@ MCP_ADMIN_PORT=3011</pre>
       }
       $("chat-search-input").value = "";
       renderChatPicker();
+      loadChats("", "all").catch(() => {});
       $("token-modal").classList.remove("hidden");
     }
 
@@ -1272,7 +1320,18 @@ MCP_ADMIN_PORT=3011</pre>
         $("chat-picker-box").classList.toggle("hidden", r.value !== "selected" || !r.checked);
       });
     });
-    $("chat-search-input").addEventListener("input", renderChatPicker);
+    document.querySelectorAll("#chat-type-pills .btn-pill").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        setChatTypeFilter(btn.dataset.chatType);
+        loadChats($("chat-search-input").value, state.chatTypeFilter).catch(() => {});
+      });
+    });
+    $("chat-search-input").addEventListener("input", () => {
+      if (state.chatSearchTimer) clearTimeout(state.chatSearchTimer);
+      state.chatSearchTimer = setTimeout(() => {
+        loadChats($("chat-search-input").value, state.chatTypeFilter).catch(() => {});
+      }, 200);
+    });
     $("add-manual-jid-btn").addEventListener("click", () => {
       const jid = prompt("WhatsApp JID eingeben (z. B. 491761234567@s.whatsapp.net oder 12345@g.us):");
       if (!jid) return;
@@ -1282,6 +1341,14 @@ MCP_ADMIN_PORT=3011</pre>
         return;
       }
       state.selectedChats.add(trimmed);
+      if (!state.selectedChatMeta.has(trimmed)) {
+        state.selectedChatMeta.set(trimmed, {
+          jid: trimmed,
+          name: trimmed,
+          isGroup: trimmed.endsWith("@g.us"),
+          isContactOnly: false
+        });
+      }
       renderChatPicker();
     });
 

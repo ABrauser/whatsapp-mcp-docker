@@ -416,23 +416,33 @@ export function storeChat(chat: Partial<Chat> & { jid: string }): void {
   const db = getDb();
   // Write path uses phone-only resolver to avoid fuzzy-name misroutes.
   const resolvedJid = resolveJidPhoneOnly(chat.jid)!;
+
+  let isoTime: string | null = null;
+  if (chat.last_message_time instanceof Date) {
+    isoTime = Number.isNaN(chat.last_message_time.getTime())
+      ? null
+      : chat.last_message_time.toISOString();
+  } else if (typeof chat.last_message_time === "string") {
+    const parsed = parseDateSafe(chat.last_message_time);
+    isoTime = parsed ? parsed.toISOString() : null;
+  }
+
   try {
     const stmt = db.prepare(`
             INSERT INTO chats (jid, name, last_message_time)
             VALUES (@jid, @name, @last_message_time)
             ON CONFLICT(jid) DO UPDATE SET
                 name = COALESCE(excluded.name, name),
-                last_message_time = COALESCE(excluded.last_message_time, last_message_time)
+                last_message_time = CASE
+                  WHEN excluded.last_message_time IS NOT NULL THEN excluded.last_message_time
+                  WHEN chats.last_message_time GLOB '[0-9][0-9][0-9][0-9]-*' THEN chats.last_message_time
+                  ELSE NULL
+                END
         `);
     stmt.run({
       jid: resolvedJid,
       name: chat.name ?? null,
-      last_message_time:
-        chat.last_message_time instanceof Date
-          ? chat.last_message_time.toISOString()
-          : chat.last_message_time === null
-            ? null
-            : String(chat.last_message_time),
+      last_message_time: isoTime,
     });
   } catch (error) {
     console.error("Error storing chat:", error);
@@ -471,7 +481,13 @@ export function storeMessage(message: Message): void {
 
     const updateChatTimeStmt = db.prepare(`
             UPDATE chats
-            SET last_message_time = MAX(COALESCE(last_message_time, '1970-01-01T00:00:00.000Z'), @timestamp)
+            SET last_message_time = CASE
+              WHEN last_message_time IS NULL OR last_message_time NOT GLOB '[0-9][0-9][0-9][0-9]-*'
+                THEN @timestamp
+              WHEN @timestamp > last_message_time
+                THEN @timestamp
+              ELSE last_message_time
+            END
             WHERE jid = @jid
         `);
     updateChatTimeStmt.run({
@@ -510,7 +526,13 @@ export function storeMessagesBatch(messages: Message[]): void {
         `);
     const updateChatTimeStmt = db.prepare(`
             UPDATE chats
-            SET last_message_time = MAX(COALESCE(last_message_time, '1970-01-01T00:00:00.000Z'), @timestamp)
+            SET last_message_time = CASE
+              WHEN last_message_time IS NULL OR last_message_time NOT GLOB '[0-9][0-9][0-9][0-9]-*'
+                THEN @timestamp
+              WHEN @timestamp > last_message_time
+                THEN @timestamp
+              ELSE last_message_time
+            END
             WHERE jid = @jid
         `);
 
@@ -741,7 +763,7 @@ export function getChats(
 
     const orderByClause =
       sortBy === "last_active"
-        ? "c.last_message_time DESC NULLS LAST"
+        ? "CASE WHEN c.last_message_time GLOB '[0-9][0-9][0-9][0-9]-*' THEN c.last_message_time ELSE NULL END DESC NULLS LAST"
         : "COALESCE(c.name, cr.display_name) ASC";
     sql += ` ORDER BY ${orderByClause}, c.jid ASC`;
 
@@ -754,6 +776,151 @@ export function getChats(
   } catch (error) {
     console.error("Error getting chats:", error);
     return [];
+  }
+}
+
+export interface PickerEntry {
+  jid: string;
+  name: string | null;
+  isGroup: boolean;
+  isContactOnly: boolean;
+  lastMessageTime: Date | null;
+}
+
+/**
+ * Search chats and (for person/all filters) saved contacts not yet in `chats`
+ * for the Admin UI chat/person picker.
+ */
+export function searchChatsAndContactsForPicker(opts?: {
+  query?: string | null;
+  type?: "all" | "person" | "group";
+  limit?: number;
+}): PickerEntry[] {
+  const db = getDb();
+  const type = opts?.type ?? "all";
+  const query = opts?.query?.trim() || null;
+  const limit = Math.min(Math.max(1, Math.floor(opts?.limit ?? 150)), 300);
+
+  const results: PickerEntry[] = [];
+  const seen = new Set<string>();
+
+  try {
+    const chatWhere: string[] = [`c.jid != ?`];
+    const chatParams: (string | number)[] = [STATUS_BROADCAST_JID];
+
+    if (type === "group") {
+      chatWhere.push(`c.jid LIKE '%@g.us'`);
+    } else if (type === "person") {
+      chatWhere.push(`c.jid NOT LIKE '%@g.us'`);
+    }
+
+    if (query) {
+      chatWhere.push(
+        `(LOWER(COALESCE(c.name, cr.display_name, c.jid)) LIKE LOWER(?) OR LOWER(c.jid) LIKE LOWER(?))`,
+      );
+      const pattern = `%${query}%`;
+      chatParams.push(pattern, pattern);
+    }
+
+    chatParams.push(limit);
+
+    const chatRows = db
+      .prepare(`
+        SELECT
+          c.jid AS jid,
+          COALESCE(c.name, cr.display_name) AS name,
+          c.last_message_time AS last_message_time
+        FROM chats c
+        LEFT JOIN contacts_resolved cr ON c.jid = cr.jid
+        WHERE ${chatWhere.join(" AND ")}
+        ORDER BY
+          CASE WHEN c.last_message_time GLOB '[0-9][0-9][0-9][0-9]-*' THEN c.last_message_time ELSE NULL END DESC NULLS LAST,
+          LOWER(COALESCE(c.name, cr.display_name, c.jid)) ASC,
+          c.jid ASC
+        LIMIT ?
+      `)
+      .all(...chatParams) as {
+        jid: string;
+        name: string | null;
+        last_message_time: string | null;
+      }[];
+
+    for (const row of chatRows) {
+      if (seen.has(row.jid)) continue;
+      seen.add(row.jid);
+      results.push({
+        jid: row.jid,
+        name: row.name ?? null,
+        isGroup: row.jid.endsWith("@g.us"),
+        isContactOnly: false,
+        lastMessageTime: parseDateSafe(row.last_message_time),
+      });
+    }
+
+    if (type !== "group" && results.length < limit) {
+      const remaining = limit - results.length;
+      const contactWhere: string[] = [
+        `cr.jid LIKE '%@s.whatsapp.net'`,
+        `cr.jid != ?`,
+        `NOT EXISTS (SELECT 1 FROM chats c WHERE c.jid = cr.jid)`,
+        `NOT EXISTS (
+          SELECT 1 FROM lid_aliases la
+          JOIN chats c ON c.jid = la.lid_jid
+          WHERE la.s_jid = cr.jid
+        )`,
+        `NOT EXISTS (
+          SELECT 1 FROM contacts clid
+          JOIN chats c ON c.jid = clid.jid
+          WHERE clid.jid LIKE '%@lid'
+            AND clid.phone_number IS NOT NULL
+            AND clid.phone_number != ''
+            AND (
+              clid.phone_number = cr.phone_number
+              OR clid.phone_number || '@s.whatsapp.net' = cr.jid
+            )
+        )`,
+      ];
+      const contactParams: (string | number)[] = [STATUS_BROADCAST_JID];
+
+      if (query) {
+        contactWhere.push(
+          `(LOWER(COALESCE(cr.display_name, cr.jid)) LIKE LOWER(?) OR LOWER(cr.jid) LIKE LOWER(?))`,
+        );
+        const pattern = `%${query}%`;
+        contactParams.push(pattern, pattern);
+      }
+
+      contactParams.push(remaining);
+
+      const contactRows = db
+        .prepare(`
+          SELECT
+            cr.jid AS jid,
+            cr.display_name AS name
+          FROM contacts_resolved cr
+          WHERE ${contactWhere.join(" AND ")}
+          ORDER BY LOWER(COALESCE(cr.display_name, cr.jid)) ASC, cr.jid ASC
+          LIMIT ?
+        `)
+        .all(...contactParams) as { jid: string; name: string | null }[];
+
+      for (const row of contactRows) {
+        if (seen.has(row.jid)) continue;
+        seen.add(row.jid);
+        results.push({
+          jid: row.jid,
+          name: row.name ?? null,
+          isGroup: false,
+          isContactOnly: true,
+          lastMessageTime: null,
+        });
+      }
+    }
+
+    return results;
+  } catch (error) {
+    console.error("Error searching chats/contacts for picker:", error);
+    return results;
   }
 }
 

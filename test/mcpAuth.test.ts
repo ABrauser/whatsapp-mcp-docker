@@ -167,6 +167,14 @@ afterEach(async () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+test("GET /health returns 200 when WhatsApp is connected", async () => {
+  const res = await fetch(`${baseUrl}/health`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as any;
+  assert.equal(body.status, "ok");
+  assert.equal(body.whatsapp_connected, true);
+});
+
 test("fail-closed auth rejects missing and wrong tokens", async () => {
   const noAuth = await rpc("tools/list");
   assert.equal(noAuth.status, 401);
